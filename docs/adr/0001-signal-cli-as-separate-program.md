@@ -1,0 +1,3 @@
+# signal-cli stays a separate, user-installed program
+
+The adapter is MIT-licensed; signal-cli (GPLv3) and libsignal (AGPLv3) are not. The adapter therefore never depends on, vendors, downloads, or postinstalls either, and this repo publishes no signal-cli image; it only talks to signal-cli over its documented JSON-RPC protocol. Two transports are supported: connecting to a signal-cli daemon the user runs (natively or as a third-party container image the user pulls, which example compose files may reference), or spawning a signal-cli binary the user installed (`signal-cli jsonRpc` over stdio). Do not "helpfully" add an auto-installer or bundled binary: that would turn a separate program into a distributed combination.

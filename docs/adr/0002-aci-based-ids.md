@@ -1,0 +1,3 @@
+# Signal users are identified by ACI, never by phone number
+
+Thread, channel, and message IDs end up persisted in the bot's state store, so their format is effectively permanent. Users are keyed by their ACI UUID because phone numbers can be hidden, can change, and are personal data; phone numbers and profile names appear only as display fields. A Conversation is both Thread and Channel, so its thread ID equals its channel ID: `signal:dm:<ACI>` or `signal:group:<base64url groupId>`. Message IDs are `<authorACI>:<timestamp>`, because a Signal timestamp alone is ambiguous across senders and reactions, deletes, and quotes all need the author.
