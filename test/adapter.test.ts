@@ -66,6 +66,12 @@ describe("configuration", () => {
     );
   });
 
+  it.each([Number.POSITIVE_INFINITY, Number.NaN, -1, 1.5, 2 ** 31])("rejects drainTimeoutMs %s", (drainTimeoutMs) => {
+    expect(() =>
+      createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: "http://signal-cli:8080" }, drainTimeoutMs }),
+    ).toThrow(expect.objectContaining({ name: "ValidationError", message: expect.stringContaining("drainTimeoutMs") }));
+  });
+
   it("rejects an unsupported transport type by name", () => {
     const transport = { type: "socket", path: "/run/signal-cli.sock" } as unknown as SignalTransportConfig;
 
@@ -299,17 +305,78 @@ describe("event stream robustness", () => {
     fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "hi" }));
     await nextDirectMessage();
 
+    let shutDown = false;
     let sentWhenShutDown: unknown[] | undefined;
     const shutdown = chat.shutdown().then(() => {
+      shutDown = true;
       sentWhenShutDown = fake.rpcRequests("send").map((request) => request.params?.message);
     });
     await fake.eventStreamsClosed();
-    expect(sentWhenShutDown).toBeUndefined();
+    // Real wait on purpose: shutdown must still be pending well after the stream closed.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(shutDown).toBe(false);
     release();
     await shutdown;
 
     expect(sentWhenShutDown).toEqual(["late reply"]);
     expect(logger.entries.filter((entry) => entry.level === "error")).toEqual([]);
+  });
+
+  it("shutdown called from a handler resolves after the drain timeout", async () => {
+    const fake = await FakeSignalCli.start();
+    const { chat, logger, nextDirectMessage } = await bot({
+      fake,
+      config: { account: BOT_ACCOUNT, transport: { type: "http", url: fake.url }, drainTimeoutMs: 50 },
+    });
+    let shutdownFromHandler: Promise<void> | undefined;
+    chat.onDirectMessage(async () => {
+      shutdownFromHandler = chat.shutdown();
+      await shutdownFromHandler;
+    });
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "stop" }));
+    await nextDirectMessage();
+    // Poll a boolean: expect.poll would await a returned promise.
+    await expect.poll(() => shutdownFromHandler !== undefined).toBe(true);
+
+    await shutdownFromHandler;
+    expect(fake.openEventStreams).toBe(0);
+    expect(logger.entries).toContainEqual(
+      expect.objectContaining({ level: "warn", message: "Stopped waiting for 1 Signal message handler(s) after 50 ms" }),
+    );
+  });
+
+  it("shutdown during startup leaves no event stream open", async () => {
+    const { fake, chat, logger } = await bot({ initialize: false });
+    const received: string[] = [];
+    chat.onDirectMessage((_thread, message) => {
+      received.push(message.text);
+    });
+
+    const starting = chat.initialize().catch(() => {});
+    await new Promise((resolve) => setImmediate(resolve));
+    await chat.shutdown();
+    await starting;
+    // Real wait on purpose: a late stream would be opened by the startup still in flight.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(fake.openEventStreams).toBe(0);
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "after shutdown" }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(received).toEqual([]);
+    expect(logger.entries.filter((entry) => entry.level === "error")).toEqual([]);
+  });
+
+  it("shutdown while the event stream is connecting closes it once it opens", async () => {
+    const { fake, chat } = await bot({ initialize: false });
+    const release = fake.holdEventStreams();
+
+    const starting = chat.initialize().catch(() => {});
+    await expect.poll(() => fake.requests.some((request) => request.path.startsWith("/api/v1/events"))).toBe(true);
+    await chat.shutdown();
+    release();
+    await starting;
+
+    await expect.poll(() => fake.openEventStreams).toBe(0);
   });
 
   it("shutdown stops waiting for a handler that never finishes after the drain timeout", async () => {
@@ -393,22 +460,20 @@ describe("event stream robustness", () => {
     expect((await nextDirectMessage()).message.text).toBe("crlf");
   });
 
-  it("warns about a message signal-cli could not receive, by exception type only", async () => {
+  it.each([
+    { case: "typed", exception: { message: "Untrusted identity: +4366012345", type: "UntrustedIdentityException" }, type: "UntrustedIdentityException" },
+    { case: "untyped", exception: { message: "Untrusted identity: +4366012345" }, type: "unknown" },
+    { case: "non-string type", exception: { message: "Untrusted identity: +4366012345", type: 7 }, type: "unknown" },
+  ])("warns about a $case receive failure with type and sender ACI only", async ({ exception, type }) => {
     const { fake, logger, nextDirectMessage } = await bot();
     const { dataMessage: _lost, ...envelope } = directTextEnvelope({ aci: ALICE_ACI, number: "+4366012345", text: "lost" });
-    fake.injectRaw(
-      `event:receive\ndata:${JSON.stringify({
-        account: BOT_ACCOUNT,
-        envelope,
-        exception: { message: "Untrusted identity: +4366012345", type: "UntrustedIdentityException" },
-      })}\n\n`,
-    );
+    fake.injectRaw(`event:receive\ndata:${JSON.stringify({ account: BOT_ACCOUNT, envelope, exception })}\n\n`);
     fake.injectEnvelope(directTextEnvelope({ aci: BOB_ACI, text: "next" }));
     await nextDirectMessage();
 
     const warnings = logger.entries.filter((entry) => entry.level === "warn");
     expect(warnings).toEqual([
-      { level: "warn", message: "signal-cli could not receive a message", args: [{ type: "UntrustedIdentityException" }] },
+      { level: "warn", message: "signal-cli could not receive a message", args: [{ type, sender: ALICE_ACI }] },
     ]);
     expect(JSON.stringify(logger.entries)).not.toContain("+4366012345");
   });

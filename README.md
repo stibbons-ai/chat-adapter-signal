@@ -62,7 +62,10 @@ still running. With Chat's default `"drop"`, that second message is dropped (Cha
 
 `disconnect()` (called by `chat.shutdown()`) first closes the event stream, then waits for
 running handlers to finish so their replies go out and their locks are released, at most
-`drainTimeoutMs`; after that it logs a warning and returns.
+`drainTimeoutMs`; after that it logs a warning and returns. Don't call `chat.shutdown()` from
+inside a message handler: the drain then waits for that handler itself, so shutdown takes the
+full `drainTimeoutMs`. A shutdown during `initialize()` stops the startup; an event stream
+that was already connecting is closed as soon as it opens.
 
 ## IDs
 

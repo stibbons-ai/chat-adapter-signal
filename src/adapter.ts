@@ -34,6 +34,9 @@ import {
 /** Oldest signal-cli release this adapter is tested against. */
 export const MIN_SIGNAL_CLI_VERSION = "0.14.9";
 
+/** Largest delay Node's `setTimeout` honours (2^31 - 1 ms). */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 /** How the adapter reaches signal-cli, by `type`. Only the HTTP daemon is supported so far. */
 export type SignalTransportConfig = HttpTransportOptions;
 
@@ -67,6 +70,8 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   private readonly drainTimeoutMs: number;
   /** Message handlers still running; `disconnect()` waits for them, bounded by `drainTimeoutMs`. */
   private readonly inFlight = new Set<Promise<void>>();
+  /** Bumped by every `initialize()` and `disconnect()`, so a startup can tell it was cancelled. */
+  private generation = 0;
   private subscription: EventSubscription | undefined;
   private _userName: string;
   private _botUserId: string | undefined;
@@ -88,7 +93,12 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     // signal-cli normalises an ACI on JSON-RPC but not in the events query, so send its canonical form everywhere.
     this.account = normalizeAci(account) ?? account;
     this.transport = createTransport(transport, this.account);
-    this.drainTimeoutMs = config.drainTimeoutMs ?? 10_000;
+    const drainTimeoutMs = config.drainTimeoutMs ?? 10_000;
+    // setTimeout fires after 1 ms for anything outside this range, which would turn "wait long" into "don't wait".
+    if (!Number.isInteger(drainTimeoutMs) || drainTimeoutMs < 0 || drainTimeoutMs > MAX_TIMEOUT_MS) {
+      throw new ValidationError(ADAPTER_NAME, `drainTimeoutMs must be an integer from 0 to ${MAX_TIMEOUT_MS}`);
+    }
+    this.drainTimeoutMs = drainTimeoutMs;
     this.explicitUserName = config.userName;
     this._userName = config.userName ?? "bot";
     this.logger = config.logger;
@@ -104,27 +114,42 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   async initialize(chat: ChatInstance): Promise<void> {
+    // A `disconnect()` during the startup round trips bumps the generation; startup then stops
+    // instead of opening an event stream that nothing would close.
+    const generation = ++this.generation;
+    const cancelled = () => generation !== this.generation;
     this.chat = chat;
     this.logger ??= chat.getLogger(ADAPTER_NAME);
     this._userName = this.explicitUserName ?? chat.getUserName();
 
     await this.transport.checkReachable();
+    if (cancelled()) return;
     await this.checkVersion();
+    if (cancelled()) return;
     this._botUserId = await this.resolveBotAci();
-    this.subscription = await this.transport.subscribe({
+    if (cancelled()) return;
+    const subscription = await this.transport.subscribe({
       onEvent: (event) => this.handleEvent(event),
       onError: (error) => this.logger?.error("signal-cli event stream error", { error }),
       onClosed: () => this.logger?.warn("signal-cli event stream closed; no further messages will be received"),
     });
+    if (cancelled()) {
+      await subscription.close();
+      return;
+    }
+    this.subscription = subscription;
   }
 
   /**
-   * Closes the event stream, then waits for running handlers so their replies
-   * and lock releases complete before Chat disconnects its state. The wait is
-   * bounded: a handler that never settles (or that itself calls
-   * `chat.shutdown()`) cannot hold shutdown forever.
+   * Closes the event stream (or stops a startup still in progress), then waits
+   * for running handlers so their replies and lock releases complete before
+   * Chat disconnects its state. The wait is bounded by `drainTimeoutMs`: a
+   * handler that never settles cannot hold shutdown forever. A handler that
+   * itself calls `chat.shutdown()` waits for itself, so that shutdown always
+   * takes the full `drainTimeoutMs`.
    */
   async disconnect(): Promise<void> {
+    this.generation++;
     const subscription = this.subscription;
     this.subscription = undefined;
     await subscription?.close();
@@ -134,6 +159,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     let timer: NodeJS.Timeout | undefined;
     const expired = new Promise<boolean>((resolve) => {
       timer = setTimeout(() => resolve(true), this.drainTimeoutMs);
+      timer.unref();
     });
     const pending = this.inFlight.size;
     const timedOut = await Promise.race([Promise.allSettled(this.inFlight).then(() => false), expired]);
@@ -279,9 +305,13 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     const { envelope, exception } = event;
     if (exception) {
       // signal-cli could not decrypt or verify an incoming message, which is then lost. Only the
-      // exception type is logged: its message can contain the sender's phone number.
+      // exception type and the sender's ACI are logged: the message can contain a phone number.
       const type = typeof exception === "object" && "type" in exception ? exception.type : undefined;
-      this.logger?.warn("signal-cli could not receive a message", { type: typeof type === "string" ? type : "unknown" });
+      const sender = envelope?.sourceUuid;
+      this.logger?.warn("signal-cli could not receive a message", {
+        type: typeof type === "string" ? type : "unknown",
+        ...(isAci(sender) ? { sender } : {}),
+      });
       return;
     }
     const message = envelope && parseDirectTextMessage(envelope, this.formatConverter, this._botUserId);

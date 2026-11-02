@@ -42,6 +42,7 @@ export class FakeSignalCli {
   private readonly rpcHandlers = new Map<string, RpcHandler>();
   private readonly rpcErrors = new Map<string, JsonRpcError>();
   private readonly rawRpcReplies = new Map<string, unknown>();
+  private eventStreamHold: Promise<void> | undefined;
   private readonly eventIdPrefix = `${Date.now()}-`;
   private nextEventSequence = 1;
   private nextSendTimestamp = 1_700_000_000_000;
@@ -88,6 +89,15 @@ export class FakeSignalCli {
   /** Answer every later call of `method` with this exact JSON body, valid JSON-RPC or not (as a broken proxy might). */
   replyRpcRaw(method: string, body: unknown): void {
     this.rawRpcReplies.set(method, body);
+  }
+
+  /** Delays answering new event-stream requests until the returned function is called. */
+  holdEventStreams(): () => void {
+    let release!: () => void;
+    this.eventStreamHold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return release;
   }
 
   private receiveEvent(envelope: unknown): string {
@@ -168,6 +178,7 @@ export class FakeSignalCli {
         response.writeHead(400).end();
         return;
       }
+      await this.eventStreamHold;
       response.writeHead(200, { "Content-Type": "text/event-stream" });
       response.flushHeaders();
       this.eventStreams.add(response);
