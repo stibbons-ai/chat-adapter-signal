@@ -160,6 +160,8 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       if (generation === this.latestStartup) {
         await this.transport.close();
       }
+      // disconnect() also fails requests still in flight on a line transport; report the cause, not the symptom.
+      throwIfCancelled();
       throw error;
     }
   }
@@ -167,10 +169,11 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   /**
    * Closes the event stream (or stops a startup still in progress), then waits
    * for running handlers so their replies and lock releases complete before
-   * Chat disconnects its state. The wait is bounded by `drainTimeoutMs`: a
-   * handler that never settles cannot hold shutdown forever. A handler that
-   * itself calls `chat.shutdown()` waits for itself, so that shutdown always
-   * takes the full `drainTimeoutMs`.
+   * Chat disconnects its state, then closes the socket or terminates the
+   * spawned signal-cli. The wait is bounded by `drainTimeoutMs`: a handler that
+   * never settles cannot hold shutdown forever. A handler that itself calls
+   * `chat.shutdown()` waits for itself, so that shutdown always takes the full
+   * `drainTimeoutMs`.
    */
   async disconnect(): Promise<void> {
     this.generation++;

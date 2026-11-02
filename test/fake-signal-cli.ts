@@ -57,6 +57,7 @@ export class FakeSignalCli {
   private readonly rpcErrors = new Map<string, JsonRpcError>();
   private readonly rawRpcReplies = new Map<string, unknown>();
   private readonly holds = new Map<string, Promise<void>>();
+  private readonly nextHolds = new Map<string, Promise<void>>();
   private readonly lineServers: NetServer[] = [];
   private readonly lineConnections = new Set<Socket>();
   private readonly eventIdPrefix = `${Date.now()}-`;
@@ -147,6 +148,9 @@ export class FakeSignalCli {
       return;
     }
     this.requests.push({ path: "line", method: "LINE", headers: {}, body: message });
+    const next = this.nextHolds.get(message.method);
+    this.nextHolds.delete(message.method);
+    await next;
     await this.holds.get(message.method);
     if (!socket.destroyed) {
       socket.write(`${JSON.stringify(this.rpcReply(message))}\n`);
@@ -199,6 +203,18 @@ export class FakeSignalCli {
   private get selfIdentifier(): string {
     const self = this.accounts[0];
     return self?.number ?? self?.aci ?? BOT_ACCOUNT;
+  }
+
+  /** Like `hold`, but only for the next line-delimited JSON-RPC call of `method`; later calls are answered at once. */
+  holdNext(method: string): () => void {
+    let release!: () => void;
+    this.nextHolds.set(
+      method,
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    return release;
   }
 
   private receiveEvent(envelope: unknown): string {

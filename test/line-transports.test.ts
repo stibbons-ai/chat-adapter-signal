@@ -6,7 +6,7 @@ import { AuthenticationError, NetworkError, ValidationError } from "@chat-adapte
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSignalAdapter, type SignalTransportConfig } from "../src/index.js";
 import { ALICE_ACI, BOT_ACCOUNT, BOT_ACI, directTextEnvelope, FakeSignalCli } from "./fake-signal-cli.js";
-import { fakeSignalCliOnPath as spawnable, startBot, type Bot } from "./helpers.js";
+import { fakeSignalCliOnPath, startBot, type Bot } from "./helpers.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
@@ -18,7 +18,7 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-async function fakeWithLine(): Promise<FakeSignalCli> {
+async function startFake(): Promise<FakeSignalCli> {
   const fake = await FakeSignalCli.start();
   cleanups.push(() => fake.stop());
   return fake;
@@ -47,8 +47,8 @@ function isRunning(pid: number): boolean {
 
 describe("spawn transport", () => {
   it("spawns `signal-cli -a <account> jsonRpc` from PATH by default", async () => {
-    const fake = await fakeWithLine();
-    await spawnable(fake);
+    const fake = await startFake();
+    await fakeSignalCliOnPath(fake);
     const { adapter } = await bot(fake, { type: "spawn" });
 
     expect(fake.spawns.map((spawn) => spawn.argv)).toEqual([["-a", BOT_ACCOUNT, "jsonRpc"]]);
@@ -56,8 +56,8 @@ describe("spawn transport", () => {
   });
 
   it("runs the configured command with extra arguments before `-a <account> jsonRpc`", async () => {
-    const fake = await fakeWithLine();
-    await spawnable(fake);
+    const fake = await startFake();
+    await fakeSignalCliOnPath(fake);
     await bot(fake, {
       type: "spawn",
       command: process.execPath,
@@ -70,8 +70,8 @@ describe("spawn transport", () => {
   });
 
   it("disconnect terminates the spawned process", async () => {
-    const fake = await fakeWithLine();
-    await spawnable(fake);
+    const fake = await startFake();
+    await fakeSignalCliOnPath(fake);
     const { chat } = await bot(fake, { type: "spawn" });
     const pid = fake.spawns[0]?.pid ?? 0;
     expect(isRunning(pid)).toBe(true);
@@ -84,8 +84,8 @@ describe("spawn transport", () => {
   });
 
   it("shutdown lets a running handler reply over the same process, then terminates it", async () => {
-    const fake = await fakeWithLine();
-    await spawnable(fake);
+    const fake = await startFake();
+    await fakeSignalCliOnPath(fake);
     const { chat, nextDirectMessage } = await bot(fake, { type: "spawn" });
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -109,9 +109,23 @@ describe("spawn transport", () => {
     expect(isRunning(fake.spawns[0]?.pid ?? 0)).toBe(false);
   });
 
+  it("disconnect kills a process that ignores SIGTERM and stdin EOF", { timeout: 15_000 }, async () => {
+    const fake = await startFake();
+    await fakeSignalCliOnPath(fake);
+    vi.stubEnv("FAKE_SIGNAL_CLI_STUBBORN", "1");
+    const { chat } = await bot(fake, { type: "spawn" });
+    const pid = fake.spawns[0]?.pid ?? 0;
+
+    const started = Date.now();
+    await chat.shutdown();
+
+    expect(isRunning(pid)).toBe(false);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(4_900);
+  });
+
   it("surfaces a process that exits after startup as a clear error, and fails requests in flight", async () => {
-    const fake = await fakeWithLine();
-    await spawnable(fake);
+    const fake = await startFake();
+    await fakeSignalCliOnPath(fake);
     const { chat, logger, nextDirectMessage } = await bot(fake, { type: "spawn" });
     fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "hi" }));
     const { thread } = await nextDirectMessage();
@@ -134,8 +148,8 @@ describe("spawn transport", () => {
   });
 
   it("surfaces a process that exits during startup with its last stderr line", async () => {
-    const fake = await fakeWithLine();
-    await spawnable(fake);
+    const fake = await startFake();
+    await fakeSignalCliOnPath(fake);
     vi.stubEnv("FAKE_SIGNAL_CLI_FAIL", `User ${BOT_ACCOUNT} is not registered.`);
     const { chat } = await bot(fake, { type: "spawn" }, false);
 
@@ -148,8 +162,8 @@ describe("spawn transport", () => {
   });
 
   it("terminates the spawned process when startup fails after it started", async () => {
-    const fake = await fakeWithLine();
-    await spawnable(fake);
+    const fake = await startFake();
+    await fakeSignalCliOnPath(fake);
     fake.accounts = [{ number: "+15559999999", aci: ALICE_ACI }];
     const { chat } = await bot(fake, { type: "spawn" }, false);
 
@@ -161,7 +175,7 @@ describe("spawn transport", () => {
   });
 
   it("fails startup clearly when the command cannot be started", async () => {
-    const fake = await fakeWithLine();
+    const fake = await startFake();
     const { chat } = await bot(fake, { type: "spawn", command: "/nonexistent/signal-cli" }, false);
 
     const failure = chat.initialize();
@@ -172,7 +186,7 @@ describe("spawn transport", () => {
 
 describe("socket and TCP transports", () => {
   it("disconnect closes the Unix socket", async () => {
-    const fake = await fakeWithLine();
+    const fake = await startFake();
     const path = await socketPath();
     await fake.listenSocket(path);
     const { chat } = await bot(fake, { type: "socket", path });
@@ -185,7 +199,7 @@ describe("socket and TCP transports", () => {
   });
 
   it("disconnect closes the TCP connection", async () => {
-    const fake = await fakeWithLine();
+    const fake = await startFake();
     const port = await fake.listenTcp();
     const { chat } = await bot(fake, { type: "tcp", host: "127.0.0.1", port });
     expect(fake.openLineConnections).toBe(1);
@@ -197,7 +211,7 @@ describe("socket and TCP transports", () => {
   });
 
   it("closes the connection when startup fails after connecting", async () => {
-    const fake = await fakeWithLine();
+    const fake = await startFake();
     const port = await fake.listenTcp();
     fake.accounts = [{ number: "+15559999999", aci: ALICE_ACI }];
     const { chat } = await bot(fake, { type: "tcp", host: "127.0.0.1", port }, false);
@@ -208,7 +222,7 @@ describe("socket and TCP transports", () => {
   });
 
   it("fails startup with a network error when nothing listens", async () => {
-    const fake = await fakeWithLine();
+    const fake = await startFake();
     const path = await socketPath();
     const { chat } = await bot(fake, { type: "socket", path }, false);
 
@@ -218,7 +232,7 @@ describe("socket and TCP transports", () => {
   });
 
   it("ignores events for other accounts on a multi-account daemon", async () => {
-    const fake = await fakeWithLine();
+    const fake = await startFake();
     const port = await fake.listenTcp();
     const { nextDirectMessage } = await bot(fake, { type: "tcp", host: "127.0.0.1", port });
 
@@ -229,7 +243,7 @@ describe("socket and TCP transports", () => {
   });
 
   it("keeps a message that arrives before the event stream is subscribed", async () => {
-    const fake = await fakeWithLine();
+    const fake = await startFake();
     const port = await fake.listenTcp();
     const releaseVersion = fake.hold("version");
     const { chat, nextDirectMessage } = await bot(fake, { type: "tcp", host: "127.0.0.1", port }, false);
@@ -244,7 +258,7 @@ describe("socket and TCP transports", () => {
   });
 
   it("skips malformed lines and keeps receiving", async () => {
-    const fake = await fakeWithLine();
+    const fake = await startFake();
     const port = await fake.listenTcp();
     const { logger, nextDirectMessage } = await bot(fake, { type: "tcp", host: "127.0.0.1", port });
 
@@ -266,7 +280,7 @@ describe("socket and TCP transports", () => {
   });
 
   it("maps JSON-RPC errors from a line connection to shared error classes", async () => {
-    const fake = await fakeWithLine();
+    const fake = await startFake();
     const port = await fake.listenTcp();
     fake.failRpc("send", { code: -32602, message: "Specified account does not exist" });
     const { nextDirectMessage } = await bot(fake, { type: "tcp", host: "127.0.0.1", port });
@@ -277,7 +291,7 @@ describe("socket and TCP transports", () => {
   });
 
   it("fails requests in flight and reports the error when the connection is reset", async () => {
-    const fake = await fakeWithLine();
+    const fake = await startFake();
     const port = await fake.listenTcp();
     const { logger, nextDirectMessage } = await bot(fake, { type: "tcp", host: "127.0.0.1", port });
     fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "hi" }));
@@ -296,8 +310,86 @@ describe("socket and TCP transports", () => {
     releaseSend();
   });
 
+  it("rejects startup cancelled by shutdown with STARTUP_CANCELLED, not the closed connection", async () => {
+    const fake = await startFake();
+    const port = await fake.listenTcp();
+    const releaseAccounts = fake.hold("listAccounts");
+    const { chat } = await bot(fake, { type: "tcp", host: "127.0.0.1", port }, false);
+    const started = chat.initialize();
+    await expect.poll(() => fake.rpcRequests("listAccounts").length).toBe(1);
+
+    await chat.shutdown();
+    releaseAccounts();
+
+    await expect(started).rejects.toMatchObject({ code: "STARTUP_CANCELLED" });
+    await expect.poll(() => fake.openLineConnections).toBe(0);
+  });
+
+  it("fails requests that signal-cli answers with an id-less error instead of hanging", async () => {
+    const fake = await startFake();
+    const port = await fake.listenTcp();
+    fake.replyRpcRaw("version", { jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: null });
+    const { chat } = await bot(fake, { type: "tcp", host: "127.0.0.1", port }, false);
+
+    await expect(chat.initialize()).rejects.toThrow(
+      expect.objectContaining({ code: "SIGNAL_CLI_ERROR", message: expect.stringContaining("Parse error") }),
+    );
+  });
+
+  it("matches replies to requests by id when signal-cli answers out of order", async () => {
+    const fake = await startFake();
+    const port = await fake.listenTcp();
+    const { nextDirectMessage } = await bot(fake, { type: "tcp", host: "127.0.0.1", port });
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "hi" }));
+    const { thread } = await nextDirectMessage();
+
+    const releaseFirst = fake.holdNext("send");
+    const first = thread.post("first");
+    await expect.poll(() => fake.rpcRequests("send").length).toBe(1);
+    const second = await thread.post("second");
+    releaseFirst();
+
+    expect(second.id).toBe(`${BOT_ACI}:1700000000000`);
+    expect((await first).id).toBe(`${BOT_ACI}:1700000000001`);
+  });
+
+  it("drops messages on a connection a late reply reopened after shutdown, instead of replaying them", async () => {
+    const fake = await startFake();
+    const port = await fake.listenTcp();
+    const started = await startBot({
+      fake,
+      config: { account: BOT_ACCOUNT, transport: { type: "tcp", host: "127.0.0.1", port }, drainTimeoutMs: 0 },
+    });
+    cleanups.push(() => started.chat.shutdown());
+    const { chat, nextDirectMessage } = started;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const replied = new Promise<void>((resolve) => {
+      chat.onDirectMessage(async (thread) => {
+        await gate;
+        await thread.post("late reply");
+        resolve();
+      });
+    });
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "hi" }));
+    const { thread } = await nextDirectMessage();
+    await chat.shutdown();
+    release();
+    await replied;
+
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "while nobody listens" }));
+    // The fake writes in order: once this reply is back, the message above has reached the adapter.
+    await thread.post("barrier");
+    await chat.initialize();
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "after restart" }));
+
+    expect((await nextDirectMessage()).message.text).toBe("after restart");
+  });
+
   it("reconnects for the next request after the daemon dropped the connection", async () => {
-    const fake = await fakeWithLine();
+    const fake = await startFake();
     const port = await fake.listenTcp();
     const { logger, nextDirectMessage } = await bot(fake, { type: "tcp", host: "127.0.0.1", port });
     fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "hi" }));

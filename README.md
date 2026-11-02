@@ -13,9 +13,8 @@ yourself; this package never bundles, downloads or installs signal-cli or libsig
 - `chat` ^4.43 (peer dependency).
 - signal-cli 0.14.9 or newer, installed by you, with the Bot Account already registered
   or linked. The adapter warns at startup when signal-cli is older. Either run it as a
-  daemon (`signal-cli daemon --http <host:port>`, `--socket <path>` or `--tcp <host:port>`;
-  the HTTP daemon must be multi-account, i.e. started without `-a`), or let the adapter
-  spawn it (see Transports).
+  daemon (`signal-cli daemon --http <host:port>`, `--socket <path>` or `--tcp <host:port>`,
+  with or without `-a`), or let the adapter spawn it (see Transports).
 
 ## Usage
 
@@ -56,18 +55,18 @@ await chat.initialize();
 
 | `transport` | signal-cli side |
 |---|---|
-| `{ type: "http", url, headers? }` | `signal-cli daemon --http <host:port>` (multi-account). `headers` are sent on every request, including the event stream, e.g. for a reverse proxy's auth. |
+| `{ type: "http", url, headers? }` | `signal-cli daemon --http <host:port>`. `headers` are sent on every request, including the event stream, e.g. for a reverse proxy's auth. |
 | `{ type: "socket", path }` | `signal-cli daemon --socket <path>` |
 | `{ type: "tcp", host, port }` | `signal-cli daemon --tcp <host:port>` |
 | `{ type: "spawn", command?, args? }` | The adapter runs `<command> <args…> -a <account> jsonRpc` and talks over its stdin/stdout. `command` defaults to `signal-cli` on `PATH`; `args` go before `-a`, e.g. `["--config", "/var/lib/signal-cli"]`. |
 
-Socket, TCP and spawn speak signal-cli's line-delimited JSON-RPC. Their daemons may run
-single- or multi-account; on a multi-account daemon the adapter ignores other accounts'
-messages. `disconnect()` closes the socket, or terminates the spawned signal-cli (SIGTERM,
+Socket, TCP and spawn speak signal-cli's line-delimited JSON-RPC. On a multi-account
+socket or TCP daemon the adapter ignores other accounts' messages. `disconnect()` closes the socket, or terminates the spawned signal-cli (SIGTERM,
 then SIGKILL after 5 s). If the spawned signal-cli exits on its own, the adapter logs a
 `NetworkError` with its exit code and last stderr line (e.g. `User +15550000001 is not
 registered.`), fails requests in flight, and receives nothing further; at startup,
-`initialize()` rejects with that error. The socket, TCP and HTTP daemons have no
+`initialize()` rejects with that error. That stderr line is signal-cli's own log output and
+can name phone numbers; treat these errors like your other logs. The socket, TCP and HTTP daemons have no
 authentication: keep them unreachable for anyone who must not send as your bot.
 
 `initialize()` checks that signal-cli is reachable, reads its version, looks up the

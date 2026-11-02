@@ -1,21 +1,30 @@
 #!/usr/bin/env node
 // Fake `signal-cli` executable for the spawn transport: proxies stdio to the
 // FakeSignalCli line server at FAKE_SIGNAL_CLI_PORT, after announcing its
-// command line. Like signal-cli it exits 0 on stdin EOF; when the server drops
-// the connection it exits 3 with an error on stderr. FAKE_SIGNAL_CLI_FAIL=<text>
-// makes it print <text> to stderr and exit 1 at once, as signal-cli does for an
-// unregistered account.
+// command line and PID. Like signal-cli it exits 0 on stdin EOF; when the
+// server drops the connection it exits 3 with an error on stderr.
+// FAKE_SIGNAL_CLI_FAIL=<text> makes it print <text> to stderr and exit 1 at
+// once, as signal-cli does for an unregistered account.
+// FAKE_SIGNAL_CLI_STUBBORN=1 makes it ignore SIGTERM and stdin EOF, so only SIGKILL stops it.
 import { connect } from "node:net";
 
 if (process.env.FAKE_SIGNAL_CLI_FAIL) {
   process.stderr.write(`${process.env.FAKE_SIGNAL_CLI_FAIL}\n`);
   process.exit(1);
 }
+const stubborn = process.env.FAKE_SIGNAL_CLI_STUBBORN === "1";
+if (stubborn) {
+  process.on("SIGTERM", () => {});
+}
 const socket = connect(Number(process.env.FAKE_SIGNAL_CLI_PORT), "127.0.0.1");
 socket.write(`${JSON.stringify({ fakeArgv: process.argv.slice(2), pid: process.pid })}\n`);
-process.stdin.pipe(socket);
+process.stdin.pipe(socket, { end: !stubborn });
 socket.pipe(process.stdout);
-process.stdin.on("end", () => process.exit(0));
+process.stdin.on("end", () => {
+  if (!stubborn) {
+    process.exit(0);
+  }
+});
 socket.on("error", () => {});
 socket.on("close", () => {
   process.stderr.write("ERROR fake signal-cli: lost connection to the daemon\n");

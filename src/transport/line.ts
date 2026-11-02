@@ -47,6 +47,8 @@ interface Connection {
 
 interface Pending {
   method: string;
+  /** The connection the request went out on; only its end rejects the request. */
+  connection: Promise<Connection>;
   resolve(result: unknown): void;
   reject(error: unknown): void;
 }
@@ -73,9 +75,11 @@ export class LineTransport implements SignalTransport {
   private listener: EventListener | undefined;
   /**
    * Notifications that arrived before `subscribe()`: signal-cli starts pushing as soon as it is
-   * connected. `null` once the subscription closed: later notifications are dropped.
+   * connected. Armed by `checkReachable()` (startup) and `subscribe()`; `null` otherwise, so a
+   * connection reopened only by `request()` (after a drop, or a late reply after `close()`)
+   * drops its notifications instead of piling them up.
    */
-  private early: ReceiveEvent[] | null = [];
+  private early: ReceiveEvent[] | null = null;
   private readonly pending = new Map<number, Pending>();
   private nextRequestId = 1;
 
@@ -102,18 +106,24 @@ export class LineTransport implements SignalTransport {
   }
 
   async checkReachable(): Promise<void> {
+    this.early ??= [];
     await this.connect();
   }
 
   async request<T>(method: string, params?: Record<string, unknown>): Promise<T> {
-    const connection = await this.connect();
+    const connecting = this.connect();
+    const connection = await connecting;
     const id = this.nextRequestId++;
-    const result = new Promise<unknown>((resolve, reject) => this.pending.set(id, { method, resolve, reject }));
+    const result = new Promise<unknown>((resolve, reject) =>
+      this.pending.set(id, { method, connection: connecting, resolve, reject }),
+    );
     connection.output.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     return (await result) as T;
   }
 
+  /** One subscriber at a time: a second `subscribe()` replaces the first listener. */
   async subscribe(listener: EventListener): Promise<EventSubscription> {
+    this.early ??= [];
     await this.connect();
     this.listener = listener;
     const early = this.early ?? [];
@@ -137,8 +147,7 @@ export class LineTransport implements SignalTransport {
     const connecting = this.connection;
     this.connection = undefined;
     this.listener = undefined;
-    // Buffer again for the next subscribe(); until then a reopened connection's notifications stay dropped.
-    this.early = [];
+    this.early = null;
     const connection = await connecting?.catch(() => undefined);
     await connection?.close();
   }
@@ -162,21 +171,21 @@ export class LineTransport implements SignalTransport {
 
   private read(connection: Connection, current: Promise<Connection>): void {
     const lines = createInterface({ input: connection.input, crlfDelay: Infinity });
-    lines.on("line", (line) => this.handleLine(line));
+    lines.on("line", (line) => this.handleLine(line, current));
     // readline re-emits input errors; the connection's own error handling reports them via `ended`.
     lines.on("error", () => {});
     void connection.ended.then((reason) => {
       lines.close();
-      if (this.connection === current) {
-        this.connection = undefined;
-      }
       const error = reason ?? new NetworkError(ADAPTER_NAME, `signal-cli connection (${this.endpoint}) was closed`);
-      for (const [id, pending] of this.pending) {
-        this.pending.delete(id);
-        pending.reject(error);
+      this.rejectPending(current, () => error);
+      // After close() a newer connection may be current; this one's end must not touch its subscriber.
+      if (this.connection !== current) {
+        return;
       }
+      this.connection = undefined;
       const listener = this.listener;
       this.listener = undefined;
+      this.early = null;
       if (reason && listener) {
         listener.onError(reason);
         listener.onClosed();
@@ -184,7 +193,16 @@ export class LineTransport implements SignalTransport {
     });
   }
 
-  private handleLine(line: string): void {
+  private rejectPending(connection: Promise<Connection>, error: (pending: Pending) => unknown): void {
+    for (const [id, pending] of this.pending) {
+      if (pending.connection === connection) {
+        this.pending.delete(id);
+        pending.reject(error(pending));
+      }
+    }
+  }
+
+  private handleLine(line: string, connection: Promise<Connection>): void {
     if (line.trim() === "") {
       return;
     }
@@ -204,6 +222,9 @@ export class LineTransport implements SignalTransport {
     }
 
     if (message.method === "receive") {
+      if (this.connection !== connection) {
+        return; // A connection being closed may still flush notifications; nobody subscribed to it.
+      }
       const params = message.params;
       if (typeof params !== "object" || params === null || Array.isArray(params)) {
         this.listener?.onError(new ValidationError(ADAPTER_NAME, "Ignoring a signal-cli receive notification without params"));
@@ -218,6 +239,12 @@ export class LineTransport implements SignalTransport {
       return; // Other notifications (e.g. callEvent) are outside this adapter.
     }
 
+    // signal-cli answers a request it could not parse with `"id": null`; it cannot say which one, so all fail.
+    if (message.id === null && message.error) {
+      const error = message.error;
+      this.rejectPending(connection, (pending) => fromJsonRpcError(error, pending.method));
+      return;
+    }
     const pending = typeof message.id === "number" ? this.pending.get(message.id) : undefined;
     if (!pending) {
       return;
@@ -317,8 +344,10 @@ async function spawnSignalCli(command: string, args: string[]): Promise<Connecti
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
     stderr = (stderr + chunk).slice(-4 * STDERR_EXCERPT_CHARS);
   });
-  // Writing to a process that just exited raises EPIPE on stdin; the exit itself is reported below.
+  // Writing to a process that just exited raises EPIPE on stdin, and a failed kill() emits "error"
+  // on the child; the exit itself is reported below.
   child.stdin.on("error", () => {});
+  child.on("error", () => {});
   let closing = false;
   const ended = new Promise<[number | null, NodeJS.Signals | null]>((resolve) =>
     child.once("close", (code, signal) => resolve([code, signal])),
