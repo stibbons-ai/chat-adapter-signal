@@ -47,7 +47,7 @@ interface Connection {
 
 interface Pending {
   method: string;
-  /** The connection the request went out on; only its end rejects the request. */
+  /** The connection the request went out on: its end, or an id-less error on it, rejects the request. */
   connection: Promise<Connection>;
   resolve(result: unknown): void;
   reject(error: unknown): void;
