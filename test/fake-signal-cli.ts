@@ -42,7 +42,7 @@ export class FakeSignalCli {
   private readonly rpcHandlers = new Map<string, RpcHandler>();
   private readonly rpcErrors = new Map<string, JsonRpcError>();
   private readonly rawRpcReplies = new Map<string, unknown>();
-  private eventStreamHold: Promise<void> | undefined;
+  private readonly holds = new Map<string, Promise<void>>();
   private readonly eventIdPrefix = `${Date.now()}-`;
   private nextEventSequence = 1;
   private nextSendTimestamp = 1_700_000_000_000;
@@ -91,12 +91,18 @@ export class FakeSignalCli {
     this.rawRpcReplies.set(method, body);
   }
 
-  /** Delays answering new event-stream requests until the returned function is called. */
-  holdEventStreams(): () => void {
+  /**
+   * Delays answering `step` until the returned function is called. `step` is "check",
+   * "events", or a JSON-RPC method name. The request is recorded before it is held.
+   */
+  hold(step: string): () => void {
     let release!: () => void;
-    this.eventStreamHold = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    this.holds.set(
+      step,
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
     return release;
   }
 
@@ -166,6 +172,7 @@ export class FakeSignalCli {
     }
 
     if (url.pathname === "/api/v1/check" && request.method === "GET") {
+      await this.holds.get("check");
       response.writeHead(200).end();
       return;
     }
@@ -178,7 +185,7 @@ export class FakeSignalCli {
         response.writeHead(400).end();
         return;
       }
-      await this.eventStreamHold;
+      await this.holds.get("events");
       response.writeHead(200, { "Content-Type": "text/event-stream" });
       response.flushHeaders();
       this.eventStreams.add(response);
@@ -193,6 +200,7 @@ export class FakeSignalCli {
       }
       const body = (await json(request)) as NonNullable<RecordedRequest["body"]>;
       recorded.body = body;
+      await this.holds.get(body.method);
       this.respondRpc(body, response);
       return;
     }

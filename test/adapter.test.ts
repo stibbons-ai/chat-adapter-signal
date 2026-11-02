@@ -7,7 +7,14 @@ import {
 } from "@chat-adapter/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSignalAdapter, type SignalTransportConfig } from "../src/index.js";
-import { BOT_ACCOUNT, BOT_ACI, directTextEnvelope, FakeSignalCli, type JsonRpcError } from "./fake-signal-cli.js";
+import {
+  BOT_ACCOUNT,
+  BOT_ACI,
+  directTextEnvelope,
+  FakeSignalCli,
+  type JsonRpcError,
+  type RecordedRequest,
+} from "./fake-signal-cli.js";
 import { startBot, type Bot } from "./helpers.js";
 
 const ALICE_ACI = "a1b2c3d4-0000-4000-8000-00000000a11c";
@@ -351,17 +358,22 @@ describe("event stream robustness", () => {
     );
   });
 
-  it("shutdown during startup rejects initialize, opens nothing, and a later initialize starts afresh", async () => {
+  it.each([
+    { gate: "check", steps: ["check"] },
+    { gate: "version", steps: ["check", "version"] },
+    { gate: "listAccounts", steps: ["check", "version", "listAccounts"] },
+  ])("shutdown while startup waits on $gate rejects initialize, stops there, and a later initialize starts afresh", async ({ gate, steps }) => {
     const { fake, chat, nextDirectMessage } = await bot({ initialize: false });
+    const step = (request: RecordedRequest) => request.body?.method ?? request.path.split("?")[0]?.replace("/api/v1/", "");
+    const release = fake.hold(gate);
 
     const starting = chat.initialize();
-    await new Promise((resolve) => setImmediate(resolve));
+    await expect.poll(() => fake.requests.map(step)).toContain(gate);
     await chat.shutdown();
+    release();
     await expect(starting).rejects.toMatchObject({ name: "AdapterError", code: "STARTUP_CANCELLED" });
-    // Real wait on purpose: a late request or stream would come from the startup still in flight.
-    await new Promise((resolve) => setTimeout(resolve, 100));
 
-    expect(fake.requests.map((request) => request.path)).toEqual(["/api/v1/check"]);
+    expect(fake.requests.map(step)).toEqual(steps);
     expect(fake.openEventStreams).toBe(0);
 
     await chat.initialize();
@@ -372,7 +384,7 @@ describe("event stream robustness", () => {
 
   it("shutdown while the event stream is connecting closes it once it opens", async () => {
     const { fake, chat } = await bot({ initialize: false });
-    const release = fake.holdEventStreams();
+    const release = fake.hold("events");
 
     const starting = chat.initialize();
     await expect.poll(() => fake.requests.some((request) => request.path.startsWith("/api/v1/events"))).toBe(true);
@@ -381,6 +393,22 @@ describe("event stream robustness", () => {
     await expect(starting).rejects.toMatchObject({ code: "STARTUP_CANCELLED" });
 
     await expect.poll(() => fake.openEventStreams).toBe(0);
+  });
+
+  it("recovers from a failed initialize after chat.shutdown()", async () => {
+    const fake = await FakeSignalCli.start();
+    fake.httpStatus = 503;
+    const { chat, nextDirectMessage } = await bot({ fake, initialize: false });
+
+    await expect(chat.initialize()).rejects.toBeInstanceOf(NetworkError);
+    fake.httpStatus = 200;
+    // Chat SDK 4.43 caches the failed initialization; shutdown clears it (documented in the README).
+    await chat.shutdown();
+    await chat.initialize();
+
+    expect(fake.openEventStreams).toBe(1);
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "recovered" }));
+    expect((await nextDirectMessage()).message.text).toBe("recovered");
   });
 
   it("shutdown stops waiting for a handler that never finishes after the drain timeout", async () => {

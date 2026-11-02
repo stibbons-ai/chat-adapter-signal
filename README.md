@@ -68,7 +68,9 @@ full `drainTimeoutMs`. A shutdown during `initialize()` stops the startup and ma
 `initialize()` reject with `AdapterError` code `STARTUP_CANCELLED`; an event stream that was
 already connecting is closed as soon as it opens. A later `chat.initialize()` starts afresh.
 Await `chat.initialize()` before calling `chat.shutdown()`: Chat SDK 4.43 does not cancel an
-initialization that has not yet reached the adapter.
+initialization that has not yet reached the adapter. If `initialize()` fails (for example while
+signal-cli is still starting), call `chat.shutdown()` before retrying: Chat SDK 4.43 caches the
+failed initialization, so a retry without it fails again without contacting signal-cli.
 
 ## IDs
 
