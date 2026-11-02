@@ -1,6 +1,7 @@
 import { once } from "node:events";
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { json } from "node:stream/consumers";
 
 export const BOT_ACCOUNT = "+15550000001";
 export const BOT_ACI = "00000000-0000-4000-8000-000000000001";
@@ -81,12 +82,27 @@ export class FakeSignalCli {
     this.rpcErrors.set(method, error);
   }
 
+  private receiveEvent(envelope: unknown): string {
+    const data = JSON.stringify({ account: BOT_ACCOUNT, envelope });
+    return `id:${this.eventIdPrefix}${this.nextEventSequence++}\nevent:receive\ndata:${data}\n\n`;
+  }
+
   /** Sends a receive event for the Bot Account to every open event stream. */
   injectEnvelope(envelope: unknown): void {
-    const data = JSON.stringify({ account: BOT_ACCOUNT, envelope });
-    const event = `id:${this.eventIdPrefix}${this.nextEventSequence++}\nevent:receive\ndata:${data}\n\n`;
+    const event = this.receiveEvent(envelope);
     for (const stream of this.eventStreams) {
       stream.write(event);
+    }
+  }
+
+  /** Like `injectEnvelope`, but delivers the event's bytes in separate writes of `size` bytes each, as a slow network would. */
+  async injectEnvelopeInPieces(envelope: unknown, size: number): Promise<void> {
+    const bytes = Buffer.from(this.receiveEvent(envelope));
+    for (let offset = 0; offset < bytes.length; offset += size) {
+      for (const stream of this.eventStreams) {
+        stream.write(bytes.subarray(offset, offset + size));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1));
     }
   }
 
@@ -135,11 +151,7 @@ export class FakeSignalCli {
         response.writeHead(415).end();
         return;
       }
-      const chunks: Buffer[] = [];
-      for await (const chunk of request) {
-        chunks.push(chunk as Buffer);
-      }
-      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as NonNullable<RecordedRequest["body"]>;
+      const body = (await json(request)) as NonNullable<RecordedRequest["body"]>;
       recorded.body = body;
       this.respondRpc(body, response);
       return;
@@ -149,12 +161,16 @@ export class FakeSignalCli {
   }
 
   private respondRpc(body: NonNullable<RecordedRequest["body"]>, response: ServerResponse): void {
-    const error = this.rpcErrors.get(body.method) ?? (this.rpcHandlers.has(body.method)
-      ? undefined
-      : { code: -32601, message: "Method not implemented" });
-    const reply = error
-      ? { jsonrpc: "2.0", id: body.id ?? null, error }
-      : { jsonrpc: "2.0", id: body.id ?? null, result: this.rpcHandlers.get(body.method)?.(body.params) };
+    const handler = this.rpcHandlers.get(body.method);
+    const error = this.rpcErrors.get(body.method);
+    let reply: Record<string, unknown>;
+    if (error) {
+      reply = { jsonrpc: "2.0", id: body.id ?? null, error };
+    } else if (handler) {
+      reply = { jsonrpc: "2.0", id: body.id ?? null, result: handler(body.params) };
+    } else {
+      reply = { jsonrpc: "2.0", id: body.id ?? null, error: { code: -32601, message: "Method not implemented" } };
+    }
     response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(reply));
   }
 }

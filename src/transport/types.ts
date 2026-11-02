@@ -1,9 +1,4 @@
-/** A receive notification from signal-cli: one envelope for the Bot Account. */
-export interface ReceiveEvent {
-  account?: string;
-  envelope?: unknown;
-  exception?: unknown;
-}
+import type { ReceiveEvent } from "../envelope.js";
 
 export interface EventListener {
   /** Called for each event in order; the next event waits until this resolves. */
@@ -24,6 +19,8 @@ export interface EventSubscription {
  * add line-delimited JSON-RPC transports (spawn, socket, tcp) behind this interface.
  */
 export interface SignalTransport {
+  /** Where signal-cli is reached, for error messages. */
+  readonly endpoint: string;
   /** Resolves when signal-cli is reachable; rejects with a shared adapter error otherwise. */
   checkReachable(): Promise<void>;
   /** Sends one JSON-RPC request and resolves with its `result`. */

@@ -7,7 +7,7 @@ import {
 } from "@chat-adapter/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSignalAdapter } from "../src/index.js";
-import { BOT_ACCOUNT, BOT_ACI, directTextEnvelope, FakeSignalCli } from "./fake-signal-cli.js";
+import { BOT_ACCOUNT, BOT_ACI, directTextEnvelope, FakeSignalCli, type JsonRpcError } from "./fake-signal-cli.js";
 import { startBot, type Bot } from "./helpers.js";
 
 const ALICE_ACI = "a1b2c3d4-0000-4000-8000-00000000a11c";
@@ -178,12 +178,20 @@ describe("inbound 1:1 messages", () => {
     const { message } = await nextDirectMessage();
     expect(message.text).toBe("delivered");
   });
+
+  it("reassembles an event that arrives in pieces, including split multi-byte characters", async () => {
+    const { fake, nextDirectMessage } = await bot();
+    const text = "Grüße 👋 aus Köln";
+    await fake.injectEnvelopeInPieces(directTextEnvelope({ aci: ALICE_ACI, text }), 7);
+
+    expect((await nextDirectMessage()).message.text).toBe(text);
+  });
 });
 
 describe("thread IDs", () => {
-  it("encodes and decodes 1:1 thread IDs and reports them as DMs", async () => {
-    const adapter = createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: "http://signal-cli:8080" } });
+  const adapter = createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: "http://signal-cli:8080" } });
 
+  it("encodes and decodes 1:1 thread IDs and reports them as DMs", () => {
     const threadId = adapter.encodeThreadId({ type: "dm", aci: ALICE_ACI });
     expect(threadId).toBe(`signal:dm:${ALICE_ACI}`);
     expect(adapter.decodeThreadId(threadId)).toEqual({ type: "dm", aci: ALICE_ACI });
@@ -200,13 +208,11 @@ describe("thread IDs", () => {
     `telegram:dm:${ALICE_ACI}`,
     "signal:group:Z3JvdXA",
   ])("rejects invalid thread ID %j", (threadId) => {
-    const adapter = createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: "http://signal-cli:8080" } });
     expect(() => adapter.decodeThreadId(threadId)).toThrow(ValidationError);
     expect(() => adapter.isDM(threadId)).toThrow(ValidationError);
   });
 
   it("refuses to encode a non-ACI user", () => {
-    const adapter = createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: "http://signal-cli:8080" } });
     expect(() => adapter.encodeThreadId({ type: "dm", aci: "+15551230001" })).toThrow(ValidationError);
   });
 });
@@ -271,11 +277,13 @@ describe("errors", () => {
         data: { response: { timestamp: 1, results: [{ type: "RATE_LIMIT_FAILURE", retryAfterSeconds: 42 }] } },
       },
       expected: AdapterRateLimitError,
+      fields: { retryAfter: 42 },
     },
     {
       kind: "not found",
       error: { code: -1, message: `The user ${ALICE_ACI} is not registered.` },
       expected: ResourceNotFoundError,
+      fields: { resourceType: "user", resourceId: ALICE_ACI },
     },
     {
       kind: "not found (per-recipient result)",
@@ -285,6 +293,7 @@ describe("errors", () => {
         data: { response: { timestamp: 1, results: [{ type: "UNREGISTERED_FAILURE", recipientAddress: { uuid: ALICE_ACI } }] } },
       },
       expected: ResourceNotFoundError,
+      fields: { resourceType: "user", resourceId: ALICE_ACI },
     },
     {
       kind: "validation (invalid params)",
@@ -301,30 +310,17 @@ describe("errors", () => {
       error: { code: -3, message: "Failed to send: connection reset" },
       expected: NetworkError,
     },
-  ])("maps a signal-cli $kind error to $expected.name", async ({ error, expected }) => {
-    const { fake, chat } = await bot();
-    fake.failRpc("send", error);
+  ] as Array<{ kind: string; error: JsonRpcError; expected: new (...args: never[]) => Error; fields?: object }>)(
+    "maps a signal-cli $kind error to $expected.name",
+    async ({ error, expected, fields }) => {
+      const { fake, chat } = await bot();
+      fake.failRpc("send", error);
 
-    await expect(post(chat)).rejects.toBeInstanceOf(expected);
-  });
-
-  it("carries the retry delay of a rate-limit error", async () => {
-    const { fake, chat } = await bot();
-    fake.failRpc("send", {
-      code: -5,
-      message: "Failed to send message due to rate limiting",
-      data: { response: { timestamp: 1, results: [{ type: "RATE_LIMIT_FAILURE", retryAfterSeconds: 42 }] } },
-    });
-
-    await expect(post(chat)).rejects.toMatchObject({ retryAfter: 42 });
-  });
-
-  it("names the unregistered recipient", async () => {
-    const { fake, chat } = await bot();
-    fake.failRpc("send", { code: -1, message: `The user ${ALICE_ACI} is not registered.` });
-
-    await expect(post(chat)).rejects.toMatchObject({ resourceType: "user", resourceId: ALICE_ACI });
-  });
+      const failure = post(chat);
+      await expect(failure).rejects.toBeInstanceOf(expected);
+      await expect(failure).rejects.toMatchObject(fields ?? {});
+    },
+  );
 
   it("surfaces signal-cli going away after startup as a network error", async () => {
     const { fake, chat } = await bot();

@@ -1,8 +1,14 @@
-import { NetworkError, ValidationError } from "@chat-adapter/shared";
-import { fromHttpStatus, fromJsonRpcError, unreachable, type JsonRpcErrorObject } from "../errors.js";
-import { ADAPTER_NAME } from "../thread-id.js";
+import {
+  AdapterRateLimitError,
+  AuthenticationError,
+  NetworkError,
+  ValidationError,
+  type AdapterError,
+} from "@chat-adapter/shared";
+import type { ReceiveEvent } from "../envelope.js";
+import { ADAPTER_NAME, fromJsonRpcError, unreachable, type JsonRpcErrorObject } from "../errors.js";
 import { parseEventStream } from "./sse.js";
-import type { EventListener, EventSubscription, ReceiveEvent, SignalTransport } from "./types.js";
+import type { EventListener, EventSubscription, SignalTransport } from "./types.js";
 
 export interface HttpTransportOptions {
   type: "http";
@@ -17,9 +23,22 @@ interface JsonRpcResponse<T> {
   error?: JsonRpcErrorObject;
 }
 
+/** Maps a non-2xx HTTP status from signal-cli (or a reverse proxy in front of it) to a shared error class. */
+function fromHttpStatus(response: Response, what: string): AdapterError {
+  const detail = `${what} returned HTTP ${response.status}`;
+  if (response.status === 401 || response.status === 403) {
+    return new AuthenticationError(ADAPTER_NAME, `${detail}; check the transport headers`);
+  }
+  if (response.status === 429) {
+    const retryAfter = Number(response.headers.get("retry-after"));
+    return new AdapterRateLimitError(ADAPTER_NAME, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined);
+  }
+  return new NetworkError(ADAPTER_NAME, detail);
+}
+
 /** signal-cli's HTTP daemon (`signal-cli daemon --http`): JSON-RPC, SSE events, health check. */
 export class HttpTransport implements SignalTransport {
-  private readonly baseUrl: string;
+  readonly endpoint: string;
   private readonly headers: Record<string, string>;
   private nextRequestId = 1;
 
@@ -27,25 +46,24 @@ export class HttpTransport implements SignalTransport {
     options: HttpTransportOptions,
     private readonly account: string,
   ) {
-    this.baseUrl = options.url.replace(/\/+$/, "");
+    this.endpoint = options.url.replace(/\/+$/, "");
     this.headers = options.headers ?? {};
   }
 
   async checkReachable(): Promise<void> {
-    const response = await this.fetch("/api/v1/check", { method: "GET" }, "health check");
+    const response = await this.fetchPath("/api/v1/check", { method: "GET" }, "health check");
     if (!response.ok) {
-      throw fromHttpStatus(response, `signal-cli health check at ${this.baseUrl}`);
+      throw fromHttpStatus(response, `signal-cli health check at ${this.endpoint}`);
     }
   }
 
   async request<T>(method: string, params?: Record<string, unknown>): Promise<T> {
-    const id = this.nextRequestId++;
-    const response = await this.fetch(
+    const response = await this.fetchPath(
       "/api/v1/rpc",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id, method, ...(params ? { params } : {}) }),
+        body: JSON.stringify({ jsonrpc: "2.0", id: this.nextRequestId++, method, params }),
       },
       `JSON-RPC ${method}`,
     );
@@ -66,13 +84,13 @@ export class HttpTransport implements SignalTransport {
 
   async subscribe(listener: EventListener): Promise<EventSubscription> {
     const abort = new AbortController();
-    const response = await this.fetch(
+    const response = await this.fetchPath(
       `/api/v1/events?account=${encodeURIComponent(this.account)}`,
       { method: "GET", headers: { Accept: "text/event-stream" }, signal: abort.signal },
       "event stream",
     );
     if (!response.ok || !response.body) {
-      throw fromHttpStatus(response, `signal-cli event stream at ${this.baseUrl}`);
+      throw fromHttpStatus(response, `signal-cli event stream at ${this.endpoint}`);
     }
 
     const body = response.body;
@@ -95,7 +113,7 @@ export class HttpTransport implements SignalTransport {
         if (abort.signal.aborted) {
           return;
         }
-        listener.onError(unreachable(`event stream at ${this.baseUrl}`, error));
+        listener.onError(unreachable(`event stream at ${this.endpoint}`, error));
       }
       listener.onClosed();
     })();
@@ -108,14 +126,14 @@ export class HttpTransport implements SignalTransport {
     };
   }
 
-  private async fetch(path: string, init: RequestInit, what: string): Promise<Response> {
+  private async fetchPath(path: string, init: RequestInit, what: string): Promise<Response> {
     try {
-      return await fetch(this.baseUrl + path, {
+      return await fetch(this.endpoint + path, {
         ...init,
         headers: { ...this.headers, ...(init.headers as Record<string, string> | undefined) },
       });
     } catch (error) {
-      throw unreachable(`${what} at ${this.baseUrl}`, error);
+      throw unreachable(`${what} at ${this.endpoint}`, error);
     }
   }
 }

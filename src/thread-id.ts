@@ -1,6 +1,5 @@
 import { ValidationError } from "@chat-adapter/shared";
-
-export const ADAPTER_NAME = "signal";
+import { ADAPTER_NAME } from "./errors.js";
 
 /**
  * A Signal Conversation as the Chat SDK addresses it. A Conversation is both

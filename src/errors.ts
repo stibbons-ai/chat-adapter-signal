@@ -6,7 +6,8 @@ import {
   ResourceNotFoundError,
   ValidationError,
 } from "@chat-adapter/shared";
-import { ADAPTER_NAME } from "./thread-id.js";
+
+export const ADAPTER_NAME = "signal";
 
 /** A JSON-RPC error object as signal-cli returns it. */
 export interface JsonRpcErrorObject {
@@ -94,24 +95,18 @@ export function fromJsonRpcError(error: JsonRpcErrorObject, method: string): Ada
   }
 }
 
-/** Maps a non-2xx HTTP status from signal-cli (or a reverse proxy in front of it) to a shared error class. */
-export function fromHttpStatus(response: Response, what: string): AdapterError {
-  const detail = `${what} returned HTTP ${response.status}`;
-  if (response.status === 401 || response.status === 403) {
-    return new AuthenticationError(ADAPTER_NAME, `${detail}; check the transport headers`);
+/** fetch failures carry the useful reason (e.g. ECONNREFUSED) on `cause`. */
+function causeMessage(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
   }
-  if (response.status === 429) {
-    const retryAfter = Number(response.headers.get("retry-after"));
-    return new AdapterRateLimitError(ADAPTER_NAME, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined);
-  }
-  return new NetworkError(ADAPTER_NAME, detail);
+  return error.cause instanceof Error ? error.cause.message : error.message;
 }
 
 export function unreachable(what: string, cause: unknown): NetworkError {
-  const reason = cause instanceof Error ? (cause.cause instanceof Error ? cause.cause.message : cause.message) : String(cause);
   return new NetworkError(
     ADAPTER_NAME,
-    `signal-cli is unreachable: ${what} failed (${reason})`,
+    `signal-cli is unreachable: ${what} failed (${causeMessage(cause)})`,
     cause instanceof Error ? cause : undefined,
   );
 }

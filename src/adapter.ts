@@ -12,17 +12,17 @@ import {
   type RawMessage,
   type ThreadInfo,
 } from "chat";
-import { parseDirectTextMessage, type SignalEnvelope, type SignalRawMessage, type SignalSendResult } from "./envelope.js";
+import {
+  parseDirectTextMessage,
+  type ReceiveEvent,
+  type SignalRawMessage,
+  type SignalSendResult,
+} from "./envelope.js";
+import { ADAPTER_NAME } from "./errors.js";
 import { SignalFormatConverter } from "./format.js";
 import { HttpTransport, type HttpTransportOptions } from "./transport/http.js";
-import type { EventSubscription, ReceiveEvent, SignalTransport } from "./transport/types.js";
-import {
-  ADAPTER_NAME,
-  decodeThreadId,
-  encodeMessageId,
-  encodeThreadId,
-  type SignalThreadId,
-} from "./thread-id.js";
+import type { EventSubscription, SignalTransport } from "./transport/types.js";
+import { decodeThreadId, encodeMessageId, encodeThreadId, type SignalThreadId } from "./thread-id.js";
 
 /** Oldest signal-cli release this adapter is tested against. */
 export const MIN_SIGNAL_CLI_VERSION = "0.14.9";
@@ -51,7 +51,6 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
 
   private readonly account: string;
   private readonly transport: SignalTransport;
-  private readonly transportUrl: string;
   private readonly formatConverter = new SignalFormatConverter();
   private readonly explicitUserName: string | undefined;
   private logger: Logger | undefined;
@@ -79,7 +78,6 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
 
     this.account = account;
     this.transport = new HttpTransport(transport, account);
-    this.transportUrl = transport.url;
     this.explicitUserName = config.userName;
     this._userName = config.userName ?? "bot";
     this.logger = config.logger;
@@ -138,7 +136,8 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   async fetchThread(threadId: string): Promise<ThreadInfo> {
-    return { id: threadId, channelId: this.channelIdFromThreadId(threadId), isDM: this.isDM(threadId), metadata: {} };
+    const { type } = decodeThreadId(threadId);
+    return { id: threadId, channelId: threadId, isDM: type === "dm", metadata: {} };
   }
 
   parseMessage(raw: SignalRawMessage): Message<SignalRawMessage> {
@@ -212,7 +211,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       if (error instanceof AdapterError && error.code === "METHOD_NOT_FOUND") {
         throw new ValidationError(
           ADAPTER_NAME,
-          `signal-cli at ${this.transportUrl} runs in single-account mode; start the daemon without -a/--account`,
+          `signal-cli at ${this.transport.endpoint} runs in single-account mode; start the daemon without -a/--account`,
         );
       }
       throw error;
@@ -221,7 +220,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     if (!self?.aci) {
       throw new AuthenticationError(
         ADAPTER_NAME,
-        `Bot Account ${this.account} is not registered or linked on the signal-cli daemon at ${this.transportUrl}`,
+        `Bot Account ${this.account} is not registered or linked on the signal-cli daemon at ${this.transport.endpoint}`,
       );
     }
     return self.aci;
@@ -235,7 +234,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   private async handleEvent(event: ReceiveEvent): Promise<void> {
-    const envelope = event.envelope as SignalEnvelope | undefined;
+    const { envelope } = event;
     if (!envelope) {
       this.logger?.warn("signal-cli reported a receive error", { exception: event.exception });
       return;

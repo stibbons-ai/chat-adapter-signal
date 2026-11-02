@@ -3,7 +3,7 @@ import { Chat, type Logger, type Message, type Thread } from "chat";
 import { createSignalAdapter, type SignalAdapter, type SignalAdapterConfig } from "../src/index.js";
 import { BOT_ACCOUNT, FakeSignalCli } from "./fake-signal-cli.js";
 
-export interface LogEntry {
+interface LogEntry {
   level: "debug" | "info" | "warn" | "error";
   message: string;
   args: unknown[];
@@ -12,7 +12,8 @@ export interface LogEntry {
 export type RecordingLogger = Logger & { entries: LogEntry[] };
 
 /** A Chat SDK logger that keeps every entry so tests can read warnings back. */
-export function recordingLogger(entries: LogEntry[] = []): RecordingLogger {
+export function recordingLogger(): RecordingLogger {
+  const entries: LogEntry[] = [];
   const record = (level: LogEntry["level"]) => (message: string, ...args: unknown[]) => {
     entries.push({ level, message, args });
   };

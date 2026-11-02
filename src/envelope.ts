@@ -20,10 +20,12 @@ export interface SignalEnvelope {
     remoteDelete?: unknown;
     storyContext?: unknown;
   };
-  editMessage?: unknown;
-  syncMessage?: unknown;
-  receiptMessage?: unknown;
-  typingMessage?: unknown;
+}
+
+/** A receive notification from signal-cli for the Bot Account. */
+export interface ReceiveEvent {
+  envelope?: SignalEnvelope;
+  exception?: unknown;
 }
 
 /** signal-cli's `send` result. */

@@ -1,36 +1,37 @@
 export interface ServerSentEvent {
-  id?: string;
   event: string;
   data: string;
 }
 
 /**
- * Parses a `text/event-stream` body per the WHATWG SSE spec: fields `id`,
- * `event`, `data` (multi-line joined by "\n"), comments ignored, an empty
- * line dispatches. Node 20 has no global EventSource, and custom headers
- * must reach the request, so the stream is read from `fetch` directly.
+ * Parses a `text/event-stream` body per the WHATWG SSE spec: fields `event`
+ * and `data` (multi-line joined by "\n"), comments ignored, an empty line
+ * dispatches. Node 20 has no global EventSource, and custom headers must
+ * reach the request, so the stream is read from `fetch` directly.
  */
 export async function* parseEventStream(body: ReadableStream<Uint8Array>): AsyncGenerator<ServerSentEvent> {
-  const decoder = new TextDecoder();
+  // Per stream, not module-level: the generator suspends at `yield` while another stream may run.
+  const lineEnd = /\r\n|\r|\n/g;
   let buffer = "";
-  let id: string | undefined;
   let event = "";
   let data: string[] = [];
 
-  for await (const chunk of body) {
-    buffer += decoder.decode(chunk, { stream: true });
-    let lineEnd: number;
-    while ((lineEnd = buffer.search(/\r\n|\r|\n/)) !== -1) {
+  for await (const chunk of body.pipeThrough(new TextDecoderStream())) {
+    buffer += chunk;
+    let start = 0;
+    lineEnd.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = lineEnd.exec(buffer)) !== null) {
       // A trailing "\r" may be the first half of a "\r\n" split across chunks.
-      if (lineEnd === buffer.length - 1 && buffer[lineEnd] === "\r") {
+      if (match[0] === "\r" && match.index === buffer.length - 1) {
         break;
       }
-      const line = buffer.slice(0, lineEnd);
-      buffer = buffer.slice(lineEnd + (buffer.startsWith("\r\n", lineEnd) ? 2 : 1));
+      const line = buffer.slice(start, match.index);
+      start = match.index + match[0].length;
 
       if (line === "") {
         if (data.length > 0) {
-          yield { ...(id === undefined ? {} : { id }), event: event || "message", data: data.join("\n") };
+          yield { event: event || "message", data: data.join("\n") };
         }
         event = "";
         data = [];
@@ -49,9 +50,8 @@ export async function* parseEventStream(body: ReadableStream<Uint8Array>): Async
         data.push(value);
       } else if (field === "event") {
         event = value;
-      } else if (field === "id" && !value.includes("\0")) {
-        id = value;
       }
     }
+    buffer = buffer.slice(start);
   }
 }
