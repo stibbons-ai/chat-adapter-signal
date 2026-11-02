@@ -6,6 +6,10 @@ import { json } from "node:stream/consumers";
 
 export const BOT_ACCOUNT = "+15550000001";
 export const BOT_ACI = "00000000-0000-4000-8000-000000000001";
+/** Events the fake keeps for replay, like signal-cli 0.14.9 `SseEventBuffer.MAX_EVENTS`. */
+const FAKE_BUFFER_EVENTS = 1000;
+/** Makes event IDs differ between fakes started in the same millisecond. */
+let fakeInstances = 0;
 export const ALICE_ACI = "a1b2c3d4-0000-4000-8000-00000000a11c";
 export const BOB_ACI = "b0b0b0b0-0000-4000-8000-000000000b0b";
 
@@ -60,8 +64,12 @@ export class FakeSignalCli {
   private readonly nextHolds = new Map<string, Promise<void>>();
   private readonly lineServers: NetServer[] = [];
   private readonly lineConnections = new Set<Socket>();
-  private readonly eventIdPrefix = `${Date.now()}-`;
+  /** Like signal-cli 0.14.9 `SseEventBuffer`: IDs `<run>-<sequence>`, a fresh `<run>` per daemon run. */
+  private eventIdPrefix = `${Date.now()}i${++fakeInstances}-`;
   private nextEventSequence = 1;
+  /** The newest events for `Last-Event-ID` replay. */
+  private eventBuffer: Array<{ sequence: number; text: string }> = [];
+  private runCount = 0;
   private nextSendTimestamp = 1_700_000_000_000;
 
   private constructor() {
@@ -93,9 +101,9 @@ export class FakeSignalCli {
     await this.listenLine(path);
   }
 
-  /** Serves line-delimited JSON-RPC on TCP (`daemon --tcp`); resolves with the port. */
-  async listenTcp(): Promise<number> {
-    const server = await this.listenLine(0, "127.0.0.1");
+  /** Serves line-delimited JSON-RPC on TCP (`daemon --tcp`), on `port` or a free one; resolves with the port. */
+  async listenTcp(port = 0): Promise<number> {
+    const server = await this.listenLine(port, "127.0.0.1");
     return (server.address() as AddressInfo).port;
   }
 
@@ -118,9 +126,17 @@ export class FakeSignalCli {
     }
   }
 
+  /** Stops serving line-delimited JSON-RPC and drops every line connection, as a stopped daemon would; `listenSocket`/`listenTcp` start it again. */
+  async stopLineServers(): Promise<void> {
+    const servers = this.lineServers.splice(0);
+    this.dropLineConnections();
+    await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))));
+  }
+
   /** Resolves once no line connection is open. */
+  // The set loses a socket in its "close" handler, so every member still has that event ahead (`closed` turns true a tick earlier).
   async lineConnectionsClosed(): Promise<void> {
-    await Promise.all([...this.lineConnections].map((socket) => (socket.closed ? undefined : once(socket, "close"))));
+    await Promise.all([...this.lineConnections].map((socket) => once(socket, "close")));
   }
 
   private async listenLine(...address: [string] | [number, string]): Promise<NetServer> {
@@ -217,17 +233,36 @@ export class FakeSignalCli {
     return release;
   }
 
+  /** Formats a receive event with the next ID and keeps it in the replay buffer. */
   private receiveEvent(envelope: unknown): string {
     const data = JSON.stringify({ account: this.selfIdentifier, envelope });
-    return `id:${this.eventIdPrefix}${this.nextEventSequence++}\nevent:receive\ndata:${data}\n\n`;
+    const sequence = this.nextEventSequence++;
+    const text = `id:${this.eventIdPrefix}${sequence}\nevent:receive\ndata:${data}\n\n`;
+    this.eventBuffer.push({ sequence, text });
+    if (this.eventBuffer.length > FAKE_BUFFER_EVENTS) {
+      this.eventBuffer.shift();
+    }
+    return text;
+  }
+
+  /** ID of the newest event sent so far. */
+  get lastEventId(): string {
+    return `${this.eventIdPrefix}${this.nextEventSequence - 1}`;
+  }
+
+  /** Like a signal-cli restart: closes every event stream and line connection and forgets the replay buffer; new IDs never match old ones. */
+  restartDaemon(): void {
+    this.closeEventStreams();
+    this.dropLineConnections();
+    this.eventBuffer = [];
+    this.eventIdPrefix = `${Date.now()}i${++fakeInstances}r${++this.runCount}-`;
+    this.nextEventSequence = 1;
   }
 
   /** Sends a receive event for the Bot Account (or the given `account`) to every open event stream and line connection. */
   injectEnvelope(envelope: unknown, account = this.selfIdentifier): void {
     const event = this.receiveEvent(envelope);
-    for (const stream of this.eventStreams) {
-      stream.write(event);
-    }
+    this.broadcast(event);
     this.injectLine({ jsonrpc: "2.0", method: "receive", params: { account, envelope } });
   }
 
@@ -243,17 +278,22 @@ export class FakeSignalCli {
   async injectEnvelopeInPieces(envelope: unknown, size: number): Promise<void> {
     const bytes = Buffer.from(this.receiveEvent(envelope));
     for (let offset = 0; offset < bytes.length; offset += size) {
-      for (const stream of this.eventStreams) {
-        stream.write(bytes.subarray(offset, offset + size));
-      }
+      this.broadcast(bytes.subarray(offset, offset + size));
       await new Promise((resolve) => setTimeout(resolve, 1));
     }
   }
 
   /** Writes raw bytes to every open event stream, for framing and malformed-data cases. */
   injectRaw(text: string): void {
+    this.broadcast(text);
+  }
+
+  /** Writes to every event stream the server has not ended. */
+  private broadcast(chunk: string | Uint8Array): void {
     for (const stream of this.eventStreams) {
-      stream.write(text);
+      if (!stream.writableEnded) {
+        stream.write(chunk);
+      }
     }
   }
 
@@ -265,8 +305,9 @@ export class FakeSignalCli {
   }
 
   /** Resolves once an event stream closes (or immediately if none is open). */
+  // Set membership, not `closed`: a member still has its "close" event ahead.
   async eventStreamsClosed(): Promise<void> {
-    await Promise.all([...this.eventStreams].map((stream) => (stream.closed ? undefined : once(stream, "close"))));
+    await Promise.all([...this.eventStreams].map((stream) => once(stream, "close")));
   }
 
   async stop(): Promise<void> {
@@ -313,6 +354,16 @@ export class FakeSignalCli {
       await this.holds.get("events");
       response.writeHead(200, { "Content-Type": "text/event-stream" });
       response.flushHeaders();
+      // signal-cli 0.14.9 replay: after a known ID, the newer buffered events; after an unknown one, all of them; without the header, none.
+      const lastEventId = request.headers["last-event-id"];
+      if (typeof lastEventId === "string") {
+        const after = lastEventId.startsWith(this.eventIdPrefix) ? Number(lastEventId.slice(this.eventIdPrefix.length)) || 0 : 0;
+        for (const event of this.eventBuffer) {
+          if (event.sequence > after) {
+            response.write(event.text);
+          }
+        }
+      }
       this.eventStreams.add(response);
       response.on("close", () => this.eventStreams.delete(response));
       return;

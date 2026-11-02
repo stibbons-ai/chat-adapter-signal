@@ -18,11 +18,12 @@ import {
   type SignalRawMessage,
   type SignalSendResult,
 } from "./envelope.js";
-import { ADAPTER_NAME, malformedResponse } from "./errors.js";
+import { ADAPTER_NAME, assertTimeoutMs, malformedResponse } from "./errors.js";
 import { SignalFormatConverter } from "./format.js";
+import { ReceiveLoop, reconnectOptions, type ReconnectOptions } from "./receive-loop.js";
 import { HttpTransport, type HttpTransportOptions } from "./transport/http.js";
 import { LineTransport, type LineTransportOptions } from "./transport/line.js";
-import type { EventSubscription, SignalTransport } from "./transport/types.js";
+import type { SignalTransport } from "./transport/types.js";
 import {
   decodeThreadId,
   encodeMessageId,
@@ -34,9 +35,6 @@ import {
 
 /** Oldest signal-cli release this adapter is tested against. */
 export const MIN_SIGNAL_CLI_VERSION = "0.14.9";
-
-/** Largest delay Node's `setTimeout` honours (2^31 - 1 ms). */
-const MAX_TIMEOUT_MS = 2_147_483_647;
 
 /** How the adapter reaches signal-cli, by `type`: HTTP daemon, spawned process, Unix socket, or TCP. */
 export type SignalTransportConfig = HttpTransportOptions | LineTransportOptions;
@@ -50,8 +48,10 @@ export interface SignalAdapterConfig {
   userName?: string;
   /** Defaults to the Chat instance's logger. */
   logger?: Logger;
-  /** How long `disconnect()` waits for running message handlers to finish. Default: 10 000 ms. */
+  /** How long `disconnect()` waits for running message handlers and the final receive-cursor write. Default: 10 000 ms. */
   drainTimeoutMs?: number;
+  /** Backoff for reconnecting a dropped event stream; see {@link ReconnectOptions}. */
+  reconnect?: ReconnectOptions;
 }
 
 /** An entry of `listAccounts`; `listContacts` entries carry the ACI as `uuid` instead. */
@@ -71,13 +71,12 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   private logger: Logger | undefined;
   private chat: ChatInstance | undefined;
   private readonly drainTimeoutMs: number;
-  /** Message handlers still running; `disconnect()` waits for them, bounded by `drainTimeoutMs`. */
-  private readonly inFlight = new Set<Promise<void>>();
   /** Bumped by every `initialize()` and `disconnect()`, so a startup can tell it was cancelled. */
   private generation = 0;
   /** The generation of the latest `initialize()`; `disconnect()` does not bump it. */
   private latestStartup = 0;
-  private subscription: EventSubscription | undefined;
+  private loop: ReceiveLoop | undefined;
+  private readonly reconnect: Required<ReconnectOptions>;
   private _userName: string;
   private _botUserId: string | undefined;
   /** The Bot Account's phone number, if it has one; signal-cli labels its events with it. */
@@ -101,11 +100,9 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     this.account = normalizeAci(account) ?? account;
     this.transport = createTransport(transport, this.account);
     const drainTimeoutMs = config.drainTimeoutMs ?? 10_000;
-    // setTimeout fires after 1 ms for anything outside this range, which would turn "wait long" into "don't wait".
-    if (!Number.isInteger(drainTimeoutMs) || drainTimeoutMs < 0 || drainTimeoutMs > MAX_TIMEOUT_MS) {
-      throw new ValidationError(ADAPTER_NAME, `drainTimeoutMs must be an integer from 0 to ${MAX_TIMEOUT_MS}`);
-    }
+    assertTimeoutMs("drainTimeoutMs", drainTimeoutMs, 0);
     this.drainTimeoutMs = drainTimeoutMs;
+    this.reconnect = reconnectOptions(config.reconnect);
     this.explicitUserName = config.userName;
     this._userName = config.userName ?? "bot";
     this.logger = config.logger;
@@ -144,16 +141,25 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       this._botUserId = self.aci;
       this.botNumber = self.number;
       throwIfCancelled();
-      const subscription = await this.transport.subscribe({
-        onEvent: (event) => this.handleEvent(event),
-        onError: (error) => this.logger?.error("signal-cli event stream error", { error }),
-        onClosed: () => this.logger?.warn("signal-cli event stream closed; no further messages will be received"),
+      // Set before starting, so a `disconnect()` during startup stops this loop (aborting its connect).
+      const loop = new ReceiveLoop({
+        transport: this.transport,
+        state: chat.getState(),
+        cursorKey: `signal:receive-cursor:${this.account}`,
+        logger: this.logger,
+        reconnect: this.reconnect,
+        dispatch: (event) => this.handleEvent(event),
       });
-      if (generation !== this.generation) {
-        await subscription.close();
-        throwIfCancelled();
+      this.loop = loop;
+      try {
+        await loop.start();
+      } catch (error) {
+        if (generation === this.generation) {
+          this.loop = undefined;
+        }
+        throw error;
       }
-      this.subscription = subscription;
+      throwIfCancelled();
     } catch (error) {
       // A failed or cancelled startup must not leave a socket open or a spawned signal-cli running,
       // unless a newer initialize() owns the transport by now.
@@ -167,40 +173,28 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   /**
-   * Closes the event stream (or stops a startup still in progress), then waits
-   * for running handlers so their replies and lock releases complete before
-   * Chat disconnects its state, then closes the socket or terminates the
-   * spawned signal-cli. The wait is bounded by `drainTimeoutMs`: a handler that
-   * never settles cannot hold shutdown forever. A handler that itself calls
-   * `chat.shutdown()` waits for itself, so that shutdown always takes the full
-   * `drainTimeoutMs`.
+   * Closes the event stream and stops reconnecting (or stops a startup still in
+   * progress), then waits for running handlers so their replies, lock releases
+   * and receive-cursor writes complete before Chat disconnects its state, then
+   * closes the socket or terminates the spawned signal-cli. The wait is bounded
+   * by `drainTimeoutMs`: a handler that never settles cannot hold shutdown
+   * forever. A handler that itself calls `chat.shutdown()` waits for itself, so
+   * that shutdown always takes the full `drainTimeoutMs`.
    */
   async disconnect(): Promise<void> {
     this.generation++;
-    const subscription = this.subscription;
-    this.subscription = undefined;
-    await subscription?.close();
-    await this.drain();
+    const loop = this.loop;
+    this.loop = undefined;
+    if (loop) {
+      await loop.stop();
+      const pending = await loop.drain(this.drainTimeoutMs);
+      if (pending > 0) {
+        this.logger?.warn(`Stopped waiting for ${pending} Signal message handler(s) after ${this.drainTimeoutMs} ms`);
+      }
+    }
     // After the drain: running handlers reply through the transport. ponytail: a handler that
     // outlives drainTimeoutMs and sends afterwards reopens the transport; nothing closes that one.
     await this.transport.close();
-  }
-
-  private async drain(): Promise<void> {
-    if (this.inFlight.size === 0) {
-      return;
-    }
-    let timer: NodeJS.Timeout | undefined;
-    const expired = new Promise<boolean>((resolve) => {
-      timer = setTimeout(() => resolve(true), this.drainTimeoutMs);
-      timer.unref();
-    });
-    const pending = this.inFlight.size;
-    const timedOut = await Promise.race([Promise.allSettled(this.inFlight).then(() => false), expired]);
-    clearTimeout(timer);
-    if (timedOut) {
-      this.logger?.warn(`Stopped waiting for ${pending} Signal message handler(s) after ${this.drainTimeoutMs} ms`);
-    }
   }
 
   async handleWebhook(): Promise<Response> {
@@ -340,7 +334,8 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     return this._botUserId;
   }
 
-  private handleEvent(event: ReceiveEvent): void {
+  /** Settles once `processMessage` for the message completes, or at once when the event is ignored. */
+  private async handleEvent(event: ReceiveEvent): Promise<void> {
     const { account, envelope, exception } = event;
     // A multi-account daemon pushes every account's events over a socket or TCP connection.
     if (account !== undefined && account !== this.botNumber && account !== this._botUserId) {
@@ -362,12 +357,12 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       this.logger?.debug("Ignoring Signal envelope outside the supported message types");
       return;
     }
-    // Not awaited: one slow handler must not hold up other Conversations, and
-    // Chat's concurrency strategies need to see overlapping messages. Chat
-    // logs handler failures itself; the catch only prevents an unhandled rejection.
-    const task = this.chat.processMessage(this, message.threadId, message).catch(() => {});
-    this.inFlight.add(task);
-    void task.then(() => this.inFlight.delete(task));
+    // The receive loop does not wait for this before the next event: one slow handler must not
+    // hold up other Conversations, and Chat's concurrency strategies need to see overlapping
+    // messages. Chat logs handler failures itself; the catch keeps them from being logged twice.
+    // A failed handler still advances the receive cursor: replaying it would hit Chat's dedupe,
+    // and retrying it forever would block the cursor.
+    await this.chat.processMessage(this, message.threadId, message).catch(() => {});
   }
 }
 

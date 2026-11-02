@@ -114,3 +114,16 @@ export function unreachable(what: string, cause: unknown): NetworkError {
     cause instanceof Error ? cause : undefined,
   );
 }
+
+/** Largest delay Node's `setTimeout` honours (2^31 - 1 ms). */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
+/**
+ * Rejects a delay option `setTimeout` would not honour: outside this range it
+ * fires after 1 ms, which would turn "wait long" into "don't wait".
+ */
+export function assertTimeoutMs(name: string, value: number, min: number): void {
+  if (!Number.isInteger(value) || value < min || value > MAX_TIMEOUT_MS) {
+    throw new ValidationError(ADAPTER_NAME, `${name} must be an integer from ${min} to ${MAX_TIMEOUT_MS}`);
+  }
+}

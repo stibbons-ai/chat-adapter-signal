@@ -6,7 +6,7 @@ import type { Readable, Writable } from "node:stream";
 import { NetworkError, ValidationError } from "@chat-adapter/shared";
 import type { ReceiveEvent } from "../envelope.js";
 import { ADAPTER_NAME, fromJsonRpcError, malformedResponse, unreachable, type JsonRpcErrorObject } from "../errors.js";
-import type { EventListener, EventSubscription, SignalTransport } from "./types.js";
+import type { EventListener, EventSubscription, SignalTransport, SubscribeOptions } from "./types.js";
 
 export interface SpawnTransportOptions {
   type: "spawn";
@@ -121,11 +121,24 @@ export class LineTransport implements SignalTransport {
     return (await result) as T;
   }
 
-  /** One subscriber at a time: a second `subscribe()` replaces the first listener. */
-  async subscribe(listener: EventListener): Promise<EventSubscription> {
+  /**
+   * One subscriber at a time: a second `subscribe()` replaces the first. signal-cli's line protocol
+   * has no event IDs or replay, so `options.lastEventId` is ignored and events carry no ID.
+   */
+  async subscribe(listener: EventListener, options: SubscribeOptions = {}): Promise<EventSubscription> {
+    const { signal } = options;
+    signal?.throwIfAborted();
     this.early ??= [];
-    await this.connect();
-    this.listener = listener;
+    // ponytail: an abort stops waiting for the connect, not the connect itself; `close()` still
+    // awaits it, which for a TCP host that never answers is the OS connect timeout.
+    await abortable(this.connect(), signal);
+    // Its own identity, so closing an older subscription of the same listener (a reconnect) leaves this one alone.
+    const own: EventListener = {
+      onEvent: (event) => listener.onEvent(event),
+      onError: (error) => listener.onError(error),
+      onClosed: () => listener.onClosed(),
+    };
+    this.listener = own;
     const early = this.early ?? [];
     this.early = [];
     for (const event of early) {
@@ -133,14 +146,15 @@ export class LineTransport implements SignalTransport {
     }
     // Only stops delivery: running handlers may still reply over this connection while the
     // adapter drains them; `close()` releases the connection afterwards.
-    return {
-      close: async () => {
-        if (this.listener === listener) {
-          this.listener = undefined;
-          this.early = null;
-        }
-      },
+    const stop = async () => {
+      signal?.removeEventListener("abort", stop);
+      if (this.listener === own) {
+        this.listener = undefined;
+        this.early = null;
+      }
     };
+    signal?.addEventListener("abort", stop, { once: true });
+    return { close: stop };
   }
 
   async close(): Promise<void> {
@@ -268,6 +282,18 @@ export class LineTransport implements SignalTransport {
   }
 }
 
+/** `promise`, or a rejection with the abort reason once `signal` aborts first. */
+function abortable<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) {
+    return promise;
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 function validate(options: LineTransportOptions): void {
   const fail = (message: string) => {
     throw new ValidationError(ADAPTER_NAME, `${message} for \`{ type: "${options.type}" }\`.`);
@@ -305,6 +331,9 @@ async function connectSocket(socket: Socket, endpoint: string): Promise<Connecti
     socket.destroy();
     throw unreachable(`connecting to ${endpoint}`, error);
   }
+  // Without it a TCP connection that died without closing (NAT timeout, a host gone) goes unnoticed
+  // for good; the OS then gives up after its keep-alive probes. A no-op on a Unix socket.
+  socket.setKeepAlive(true, 30_000);
   let closing = false;
   let failure: Error | undefined;
   socket.on("error", (error) => {

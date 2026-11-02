@@ -117,3 +117,67 @@ it("group bot: answers in the Group only when mentioned or quote-replied to", as
   ]);
   expect(answered).toEqual(["￼ ping", "pong?"]);
 });
+
+/**
+ * Walkthrough for a bot operator: the echo bot keeps answering through a
+ * network drop, a signal-cli restart, and a Host App restart (same state store,
+ * as Redis would be), and every message is answered exactly once. Read back
+ * from signal-cli what the bot actually sent.
+ */
+it("echo bot: survives drops and restarts without losing or repeating replies", async () => {
+  const signalCli = await FakeSignalCli.start();
+  const state = createMemoryState(); // stands in for a persistent store: its values outlive chat.shutdown()
+  const startHostApp = async () => {
+    const chat = new Chat({
+      userName: "echo-bot",
+      adapters: {
+        signal: createSignalAdapter({
+          account: BOT_ACCOUNT,
+          transport: { type: "http", url: signalCli.url },
+          reconnect: { minDelayMs: 5, maxDelayMs: 50 },
+        }),
+      },
+      state,
+      concurrency: "queue",
+      logger: "silent",
+    });
+    chat.onDirectMessage(async (thread, message) => {
+      await thread.post(`echo: ${message.text}`);
+    });
+    await chat.initialize();
+    return chat;
+  };
+  const sent = () => signalCli.rpcRequests("send").map((request) => request.params?.message);
+  const alice = (text: string) => signalCli.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text }));
+
+  let chat = await startHostApp();
+  cleanup = async () => {
+    await chat.shutdown();
+    await signalCli.stop();
+  };
+  alice("one");
+  await expect.poll(sent).toEqual(["echo: one"]);
+
+  // Network drop: Alice writes while the bot is disconnected.
+  signalCli.closeEventStreams();
+  await signalCli.eventStreamsClosed();
+  alice("two");
+  await expect.poll(sent).toEqual(["echo: one", "echo: two"]);
+
+  // signal-cli restarts; Alice writes before the bot has reconnected.
+  signalCli.restartDaemon();
+  alice("three");
+  await expect.poll(sent).toEqual(["echo: one", "echo: two", "echo: three"]);
+
+  // Host App restart: Alice writes while it is down.
+  await chat.shutdown();
+  alice("four");
+  chat = await startHostApp();
+  await expect.poll(sent).toEqual(["echo: one", "echo: two", "echo: three", "echo: four"]);
+
+  // Nothing is answered twice, even after replays settle.
+  alice("five");
+  await expect.poll(sent).toHaveLength(5);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(sent()).toEqual(["echo: one", "echo: two", "echo: three", "echo: four", "echo: five"]);
+});
