@@ -6,9 +6,9 @@ import {
   type AdapterError,
 } from "@chat-adapter/shared";
 import type { ReceiveEvent } from "../envelope.js";
-import { ADAPTER_NAME, fromJsonRpcError, malformedResponse, unreachable, type JsonRpcErrorObject } from "../errors.js";
+import { ADAPTER_NAME, assertTimeoutMs, fromJsonRpcError, malformedResponse, unreachable, type JsonRpcErrorObject } from "../errors.js";
 import { parseEventStream } from "./sse.js";
-import type { EventListener, EventSubscription, SignalTransport } from "./types.js";
+import type { EventListener, EventSubscription, SignalTransport, SubscribeOptions } from "./types.js";
 
 export interface HttpTransportOptions {
   type: "http";
@@ -16,6 +16,12 @@ export interface HttpTransportOptions {
   url: string;
   /** Sent on every request, including the event stream, e.g. for a reverse proxy's auth. */
   headers?: Record<string, string>;
+  /**
+   * The event stream counts as dropped (and is reconnected) after this long without any data,
+   * which catches connections that died without closing. signal-cli sends a keep-alive every
+   * `--sse-keepalive-interval` seconds (default 15); keep this well above it. Default: 60 000 ms.
+   */
+  idleTimeoutMs?: number;
 }
 
 interface JsonRpcResponse<T> {
@@ -40,6 +46,7 @@ function fromHttpStatus(response: Response, what: string): AdapterError {
 export class HttpTransport implements SignalTransport {
   readonly endpoint: string;
   private readonly headers: Record<string, string>;
+  private readonly idleTimeoutMs: number;
   private nextRequestId = 1;
 
   constructor(
@@ -48,6 +55,8 @@ export class HttpTransport implements SignalTransport {
   ) {
     this.endpoint = options.url.replace(/\/+$/, "");
     this.headers = options.headers ?? {};
+    this.idleTimeoutMs = options.idleTimeoutMs ?? 60_000;
+    assertTimeoutMs("transport.idleTimeoutMs", this.idleTimeoutMs, 1);
   }
 
   async checkReachable(): Promise<void> {
@@ -85,18 +94,55 @@ export class HttpTransport implements SignalTransport {
     return payload.result as T;
   }
 
-  async subscribe(listener: EventListener): Promise<EventSubscription> {
+  async subscribe(listener: EventListener, options: SubscribeOptions = {}): Promise<EventSubscription> {
     const abort = new AbortController();
-    const response = await this.fetchPath(
-      `/api/v1/events?account=${encodeURIComponent(this.account)}`,
-      { method: "GET", headers: { Accept: "text/event-stream" }, signal: abort.signal },
-      "event stream",
-    );
+    const signal = options.signal ? AbortSignal.any([abort.signal, options.signal]) : abort.signal;
+    const headers: Record<string, string> = { Accept: "text/event-stream" };
+    if (options.lastEventId) {
+      // signal-cli replays the events it buffered after this ID (all of them for an ID it doesn't know).
+      headers["Last-Event-ID"] = options.lastEventId;
+    }
+    // Response headers, and then any bytes (keep-alive comments included), must arrive within
+    // idleTimeoutMs: a connection that died without closing would otherwise hang until undici gives up.
+    let idle = false;
+    let timer: NodeJS.Timeout | undefined;
+    const resetIdleTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        idle = true;
+        abort.abort();
+      }, this.idleTimeoutMs);
+      timer.unref();
+    };
+    const idleError = () =>
+      new NetworkError(ADAPTER_NAME, `No data on the event stream at ${this.endpoint} for ${this.idleTimeoutMs} ms`);
+    resetIdleTimer();
+    let response: Response;
+    try {
+      response = await this.fetchPath(
+        `/api/v1/events?account=${encodeURIComponent(this.account)}`,
+        { method: "GET", headers, signal },
+        "event stream",
+      );
+    } catch (error) {
+      clearTimeout(timer);
+      throw idle ? idleError() : error;
+    }
     if (!response.ok || !response.body) {
+      clearTimeout(timer);
+      // Release the connection now: the receive loop retries, possibly for a long time.
+      await response.body?.cancel().catch(() => {});
       throw fromHttpStatus(response, `signal-cli event stream at ${this.endpoint}`);
     }
-
-    const body = response.body;
+    resetIdleTimer(); // the body gets its own idleTimeoutMs after the headers
+    const body = response.body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          resetIdleTimer();
+          controller.enqueue(chunk);
+        },
+      }),
+    );
     const done = (async () => {
       try {
         for await (const event of parseEventStream(body)) {
@@ -118,16 +164,21 @@ export class HttpTransport implements SignalTransport {
             continue;
           }
           try {
-            listener.onEvent(parsed as ReceiveEvent);
+            listener.onEvent(parsed as ReceiveEvent, event.id);
           } catch (error) {
             listener.onError(error);
           }
         }
       } catch (error) {
-        if (abort.signal.aborted) {
+        if (idle) {
+          listener.onError(idleError());
+        } else if (signal.aborted) {
           return;
+        } else {
+          listener.onError(unreachable(`event stream at ${this.endpoint}`, error));
         }
-        listener.onError(unreachable(`event stream at ${this.endpoint}`, error));
+      } finally {
+        clearTimeout(timer);
       }
       listener.onClosed();
     })();

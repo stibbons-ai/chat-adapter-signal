@@ -49,13 +49,14 @@ await chat.initialize();
 | `transport` | `SIGNAL_CLI_URL` (implies `{ type: "http" }`) | How to reach signal-cli; see Transports. |
 | `userName` | – | Defaults to the `Chat` instance's `userName`. |
 | `logger` | – | Defaults to the `Chat` instance's logger. |
-| `drainTimeoutMs` | – | How long `disconnect()` waits for running handlers. Default 10 000. |
+| `drainTimeoutMs` | – | How long `disconnect()` waits for running handlers and the final receive-cursor write. Default 10 000. |
+| `reconnect` | – | `{ minDelayMs?, maxDelayMs? }` backoff for reconnecting a dropped event stream; see below. |
 
 ### Transports
 
 | `transport` | signal-cli side |
 |---|---|
-| `{ type: "http", url, headers? }` | `signal-cli daemon --http <host:port>`. `headers` are sent on every request, including the event stream, e.g. for a reverse proxy's auth. |
+| `{ type: "http", url, headers?, idleTimeoutMs? }` | `signal-cli daemon --http <host:port>`. `headers` are sent on every request, including the event stream, e.g. for a reverse proxy's auth. `idleTimeoutMs` (default 60 000): see Reliable receive. |
 | `{ type: "socket", path }` | `signal-cli daemon --socket <path>` |
 | `{ type: "tcp", host, port }` | `signal-cli daemon --tcp <host:port>` |
 | `{ type: "spawn", command?, args? }` | The adapter runs `<command> <args…> -a <account> jsonRpc` and talks over its stdin/stdout. `command` defaults to `signal-cli` on `PATH`; `args` go before `-a`, e.g. `["--config", "/var/lib/signal-cli"]`. |
@@ -64,7 +65,7 @@ Socket, TCP and spawn speak signal-cli's line-delimited JSON-RPC. On a multi-acc
 socket or TCP daemon the adapter ignores other accounts' messages. `disconnect()` closes the socket, or terminates the spawned signal-cli (SIGTERM,
 then SIGKILL after 5 s). If the spawned signal-cli exits on its own, the adapter logs a
 `NetworkError` with its exit code and last stderr line (e.g. `User +15550000001 is not
-registered.`), fails requests in flight, and receives nothing further; at startup,
+registered.`), fails requests in flight, and starts it again (see Reliable receive); at startup,
 `initialize()` rejects with that error. That stderr line is signal-cli's own log output and
 can name phone numbers; treat these errors like your other logs. The socket, TCP and HTTP daemons have no
 authentication: keep them unreachable for anyone who must not send as your bot.
@@ -80,9 +81,10 @@ handler in one Conversation does not hold up the others. Within one Conversation
 still running. With Chat's default `"drop"`, that second message is dropped (Chat logs a
 `LockError`); use `"queue"` (or `"debounce"`) for Signal bots, as in the example above.
 
-`disconnect()` (called by `chat.shutdown()`) first closes the event stream, then waits for
-running handlers to finish so their replies go out and their locks are released, at most
-`drainTimeoutMs` (after that it logs a warning), then closes the socket or spawned signal-cli. Don't call `chat.shutdown()` from
+`disconnect()` (called by `chat.shutdown()`) first closes the event stream and stops
+reconnecting, then waits for running handlers to finish so their replies go out, their locks
+are released and the receive cursor is stored, at most `drainTimeoutMs` (after that it logs a
+warning), then closes the socket or spawned signal-cli. Don't call `chat.shutdown()` from
 inside a message handler: the drain then waits for that handler itself, so shutdown takes the
 full `drainTimeoutMs`. A shutdown during `initialize()` stops the startup and makes
 `initialize()` reject with `AdapterError` code `STARTUP_CANCELLED`; an event stream that was
@@ -91,6 +93,55 @@ Await `chat.initialize()` before calling `chat.shutdown()`: Chat SDK 4.43 does n
 initialization that has not yet reached the adapter. If `initialize()` fails (for example while
 signal-cli is still starting), call `chat.shutdown()` before retrying: Chat SDK 4.43 caches the
 failed initialization, so a retry without it fails again without contacting signal-cli.
+
+## Reliable receive
+
+When the event stream drops (network failure, signal-cli restart), the adapter reconnects by
+itself with exponential backoff: `reconnect.minDelayMs` (default 1 000) doubling per failed
+attempt up to `reconnect.maxDelayMs` (default 30 000), each delay shortened by up to 50 %
+jitter. It keeps retrying until `chat.shutdown()`, logging a warning per attempt.
+On the HTTP transport, a connection that dies without closing (NAT timeout, sleep, a proxy dropping upstream) is
+detected when no data, not even signal-cli's keep-alive (every 15 s by default,
+`--sse-keepalive-interval`), arrives for `transport.idleTimeoutMs`; keep that well above the
+daemon's keep-alive interval.
+
+On the HTTP transport, the adapter stores the ID of the last processed event in Chat's state adapter (key
+`signal:receive-cursor:<account>`) and sends it as `Last-Event-ID` on every reconnect and at
+startup, so signal-cli replays what was received meanwhile. An event counts as processed once
+`chat.processMessage` for it has completed, and the cursor never moves past an event that is
+still running. Replayed events that were already processed, or are still running, are skipped,
+so no handler runs twice for one event.
+
+Limits:
+
+- signal-cli keeps the last 1 000 events of its current run in memory. Events older than that,
+  or received before a signal-cli restart that the adapter missed, are not replayed.
+- To resume after a Host App restart, the state adapter must be persistent (e.g. Redis);
+  `@chat-adapter/state-memory` loses the cursor with the process.
+- With `concurrency: "queue"` or `"debounce"`, `processMessage` completes once the message is
+  queued in Chat's state, not when its handler finishes.
+- An event whose handler was cut off by a crash is replayed, but Chat skips it as a duplicate
+  while its dedupe entry lasts (`dedupeTtlMs`, default 10 minutes): Chat records a message as
+  seen before its handler runs.
+- If `chat.processMessage` fails (the handler throws, or Chat's state store fails before the
+  handler runs), the event still counts as processed so one bad event cannot stall the stream;
+  Chat logs the error.
+- After a fresh start (no stored cursor), there is no ID to resume from until the first event
+  arrives: a reconnect in that window replays nothing (the adapter logs a warning), and a Host App
+  crash before that event was processed loses the events not yet processed. Once an event was received,
+  reconnects resume after the newest one.
+
+Socket, TCP and spawn reconnect the same way (spawn starts signal-cli again), but signal-cli's
+line-delimited JSON-RPC has no event IDs and no replay, so nothing is resumed there:
+
+- A socket or TCP daemon keeps receiving while the adapter is disconnected, and those events
+  are lost. Use the HTTP transport if missed messages matter.
+- A spawned signal-cli receives nothing while it is down; the Signal server keeps the messages
+  and delivers them once it runs again.
+- A TCP connection that dies without closing is noticed only by the operating system's TCP
+  keep-alive, which can take minutes.
+- At shutdown, events signal-cli pushes while running handlers drain are not handled, and on
+  these transports nothing brings them back.
 
 ## IDs
 

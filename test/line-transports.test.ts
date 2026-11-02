@@ -6,6 +6,7 @@ import { AuthenticationError, NetworkError, ValidationError } from "@chat-adapte
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSignalAdapter, type SignalTransportConfig } from "../src/index.js";
 import { ALICE_ACI, BOT_ACCOUNT, BOT_ACI, directTextEnvelope, FakeSignalCli } from "./fake-signal-cli.js";
+import { LineTransport } from "../src/transport/line.js";
 import { fakeSignalCliOnPath, startBot, type Bot } from "./helpers.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
@@ -401,6 +402,165 @@ describe("socket and TCP transports", () => {
 
     expect(sent.id).toBe(`${BOT_ACI}:1700000000000`);
     expect(fake.openLineConnections).toBe(1);
+  });
+});
+
+describe("reconnect on line transports", () => {
+  /** Each line transport, wired to the fake, with a way to bring a stopped daemon back. */
+  const variants: Record<string, (fake: FakeSignalCli) => Promise<{ transport: SignalTransportConfig; restart(): Promise<unknown> }>> = {
+    socket: async (fake) => {
+      const path = await socketPath();
+      await fake.listenSocket(path);
+      return { transport: { type: "socket", path }, restart: () => fake.listenSocket(path) };
+    },
+    tcp: async (fake) => {
+      const port = await fake.listenTcp();
+      return { transport: { type: "tcp", host: "127.0.0.1", port }, restart: () => fake.listenTcp(port) };
+    },
+    spawn: async (fake) => {
+      await fakeSignalCliOnPath(fake);
+      const port = Number(process.env.FAKE_SIGNAL_CLI_PORT);
+      return { transport: { type: "spawn" }, restart: () => fake.listenTcp(port) };
+    },
+  };
+
+  it.each(Object.keys(variants))(
+    "%s: reconnects with backoff while signal-cli is down, then handles each new message once",
+    async (type) => {
+      const fake = await startFake();
+      const { transport, restart } = await (variants[type] as (typeof variants)[string])(fake);
+      const started = await startBot({
+        fake,
+        config: { account: BOT_ACCOUNT, transport, reconnect: { minDelayMs: 5, maxDelayMs: 20 } },
+      });
+      cleanups.push(() => started.chat.shutdown());
+      const { logger, nextDirectMessage } = started;
+      fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "before" }));
+      expect((await nextDirectMessage()).message.text).toBe("before");
+
+      await fake.stopLineServers();
+      const attempts = () => logger.entries.filter((entry) => /reconnecting in \d+ ms/.test(entry.message)).length;
+      // At least two attempts failed while the daemon was down: the backoff kept retrying.
+      await expect.poll(attempts).toBeGreaterThanOrEqual(3);
+      await restart();
+      await expect.poll(() => fake.openLineConnections).toBe(1);
+      await expect.poll(() => logger.entries.some((entry) => /^Reconnected to the signal-cli event stream/.test(entry.message))).toBe(true);
+
+      fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "after" }));
+      expect((await nextDirectMessage()).message.text).toBe("after");
+      // No second "after" was handled in between: the next message is the sentinel.
+      fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "sentinel" }));
+      expect((await nextDirectMessage()).message.text).toBe("sentinel");
+      // Line transports have no event IDs: nothing is resumed, and no cursor is written.
+      expect(await started.chat.getState().get(`signal:receive-cursor:${BOT_ACCOUNT}`)).toBeNull();
+      if (type === "spawn") {
+        expect(fake.spawns.length).toBeGreaterThanOrEqual(2);
+      }
+    },
+  );
+
+  it("subscribe rejects for an aborted signal, and an abort afterwards stops delivery without onClosed", async () => {
+    const fake = await startFake();
+    const port = await fake.listenTcp();
+    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port }, BOT_ACCOUNT);
+    cleanups.push(() => transport.close());
+    const events: unknown[] = [];
+    const listener = { onEvent: (event: unknown) => events.push(event), onError: () => {}, onClosed: vi.fn() };
+
+    await expect(transport.subscribe(listener, { signal: AbortSignal.abort() })).rejects.toThrow();
+
+    const abort = new AbortController();
+    await transport.subscribe(listener, { signal: abort.signal });
+    await expect.poll(() => fake.openLineConnections).toBe(1);
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "one" }));
+    await expect.poll(() => events.length).toBe(1);
+    abort.abort();
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "two" }));
+    fake.dropLineConnections();
+    await expect.poll(() => fake.openLineConnections).toBe(0);
+    expect(events).toHaveLength(1);
+    expect(listener.onClosed).not.toHaveBeenCalled();
+  });
+
+  it("an abort while still connecting rejects subscribe at once with the abort reason", async () => {
+    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port: 1 }, BOT_ACCOUNT);
+    // A connect that never answers (a TCP host that drops SYNs), released only by the cleanup.
+    let fail!: (error: Error) => void;
+    Object.assign(transport, { open: () => new Promise((_, reject) => (fail = reject)) });
+    cleanups.push(async () => {
+      fail(new Error("released"));
+      await transport.close();
+    });
+    const abort = new AbortController();
+    const subscribing = transport.subscribe({ onEvent: () => {}, onError: () => {}, onClosed: () => {} }, { signal: abort.signal });
+
+    const reason = new Error("stopping");
+    abort.abort(reason);
+
+    await expect(subscribing).rejects.toBe(reason);
+  });
+
+  it("keeps events pushed on a connection a reply reopened after a drop, for the next subscribe", async () => {
+    const fake = await startFake();
+    const port = await fake.listenTcp();
+    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port }, BOT_ACCOUNT);
+    cleanups.push(() => transport.close());
+    const events: unknown[] = [];
+    const closed = vi.fn();
+    const listener = { onEvent: (event: unknown) => events.push(event), onError: () => {}, onClosed: closed };
+    await transport.subscribe(listener);
+    await expect.poll(() => fake.openLineConnections).toBe(1);
+
+    fake.dropLineConnections();
+    await expect.poll(() => closed.mock.calls.length).toBe(1);
+    await transport.request("version"); // a handler's reply during the receive loop's backoff
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "pushed meanwhile" }));
+    await transport.request("version"); // the fake answers in order, so the notification is in by now
+    await transport.subscribe(listener);
+
+    expect(events).toHaveLength(1);
+  });
+
+  it("keeps the buffered events through a second drop before the next subscribe, at most 1 000", async () => {
+    const fake = await startFake();
+    const port = await fake.listenTcp();
+    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port }, BOT_ACCOUNT);
+    cleanups.push(() => transport.close());
+    const events: unknown[] = [];
+    const closed = vi.fn();
+    const listener = { onEvent: (event: unknown) => events.push(event), onError: () => {}, onClosed: closed };
+    await transport.subscribe(listener);
+    await expect.poll(() => fake.openLineConnections).toBe(1);
+    fake.dropLineConnections();
+    await expect.poll(() => closed.mock.calls.length).toBe(1);
+
+    await transport.request("version");
+    for (let i = 0; i < 1_001; i++) {
+      fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: `m${i}` }));
+    }
+    await transport.request("version");
+    fake.dropLineConnections();
+    await expect.poll(() => fake.openLineConnections).toBe(0);
+    await transport.subscribe(listener);
+
+    expect(events).toHaveLength(1_000);
+  });
+
+  it("closing an older subscription of the same listener leaves the newer one delivering", async () => {
+    const fake = await startFake();
+    const port = await fake.listenTcp();
+    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port }, BOT_ACCOUNT);
+    cleanups.push(() => transport.close());
+    const events: unknown[] = [];
+    const listener = { onEvent: (event: unknown) => events.push(event), onError: () => {}, onClosed: () => {} };
+
+    const older = await transport.subscribe(listener);
+    await transport.subscribe(listener);
+    await older.close();
+    await expect.poll(() => fake.openLineConnections).toBe(1);
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "still here" }));
+
+    await expect.poll(() => events.length).toBe(1);
   });
 });
 

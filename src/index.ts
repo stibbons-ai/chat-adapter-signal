@@ -7,6 +7,7 @@ export {
 } from "./adapter.js";
 export type { SignalEnvelope, SignalRawMessage, SignalSendResult } from "./envelope.js";
 export { SignalFormatConverter } from "./format.js";
+export type { ReconnectOptions } from "./receive-loop.js";
 export type { HttpTransportOptions } from "./transport/http.js";
 export type {
   LineTransportOptions,

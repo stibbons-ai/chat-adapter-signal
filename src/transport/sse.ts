@@ -1,14 +1,25 @@
 export interface ServerSentEvent {
   event: string;
   data: string;
+  /**
+   * The `id` field of this event, if it is header-safe (see `isHeaderSafeEventId`; signal-cli's
+   * IDs always are). Unlike the spec's last event ID it is
+   * not carried over to later events: the receive loop treats a repeated ID as a replay.
+   */
+  id: string | undefined;
+}
+
+/** Whether an event ID can be sent back as the `Last-Event-ID` header: visible ASCII only, no space or control characters. */
+export function isHeaderSafeEventId(id: string): boolean {
+  return /^[\x21-\x7e]+$/.test(id);
 }
 
 /**
- * Parses a `text/event-stream` body per the WHATWG SSE spec: fields `event`
- * and `data` (multi-line joined by "\n"), comments ignored, an empty line
- * dispatches. Node 24 has no global EventSource without an experimental
- * flag, and custom headers must reach the request, so the stream is read
- * from `fetch` directly.
+ * Parses a `text/event-stream` body per the WHATWG SSE spec: fields `event`,
+ * `data` (multi-line joined by "\n") and `id` (per event, see
+ * `ServerSentEvent.id`), comments ignored, an empty line dispatches. Node 24
+ * has no global EventSource without an experimental flag, and custom headers
+ * must reach the request, so the stream is read from `fetch` directly.
  */
 export async function* parseEventStream(body: ReadableStream<Uint8Array>): AsyncGenerator<ServerSentEvent> {
   // Per stream, not module-level: the generator suspends at `yield` while another stream may run.
@@ -16,6 +27,7 @@ export async function* parseEventStream(body: ReadableStream<Uint8Array>): Async
   let buffer = "";
   let event = "";
   let data: string[] = [];
+  let id: string | undefined;
   // The previous chunk ended in "\r": that ended a line, and a "\n" opening this chunk belongs to it.
   let skipLeadingLineFeed = false;
 
@@ -35,9 +47,10 @@ export async function* parseEventStream(body: ReadableStream<Uint8Array>): Async
 
       if (line === "") {
         if (data.length > 0) {
-          yield { event: event || "message", data: data.join("\n") };
+          yield { event: event || "message", data: data.join("\n"), id };
         }
         event = "";
+        id = undefined;
         data = [];
         continue;
       }
@@ -54,6 +67,8 @@ export async function* parseEventStream(body: ReadableStream<Uint8Array>): Async
         data.push(value);
       } else if (field === "event") {
         event = value;
+      } else if (field === "id") {
+        id = isHeaderSafeEventId(value) ? value : undefined;
       }
     }
     buffer = buffer.slice(start);

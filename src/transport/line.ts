@@ -6,7 +6,7 @@ import type { Readable, Writable } from "node:stream";
 import { NetworkError, ValidationError } from "@chat-adapter/shared";
 import type { ReceiveEvent } from "../envelope.js";
 import { ADAPTER_NAME, fromJsonRpcError, malformedResponse, unreachable, type JsonRpcErrorObject } from "../errors.js";
-import type { EventListener, EventSubscription, SignalTransport } from "./types.js";
+import type { EventListener, EventSubscription, SignalTransport, SubscribeOptions } from "./types.js";
 
 export interface SpawnTransportOptions {
   type: "spawn";
@@ -33,6 +33,8 @@ export type LineTransportOptions = SpawnTransportOptions | SocketTransportOption
 
 /** How long `close()` waits for a spawned signal-cli to exit after SIGTERM before sending SIGKILL. */
 const KILL_AFTER_MS = 5_000;
+/** Most notifications kept for a subscriber that has not (re)subscribed yet. */
+const EARLY_EVENTS_MAX = 1_000;
 /** Longest stderr excerpt quoted in an unexpected-exit error. */
 const STDERR_EXCERPT_CHARS = 300;
 
@@ -75,9 +77,10 @@ export class LineTransport implements SignalTransport {
   private listener: EventListener | undefined;
   /**
    * Notifications that arrived before `subscribe()`: signal-cli starts pushing as soon as it is
-   * connected. Armed by `checkReachable()` (startup) and `subscribe()`; `null` otherwise, so a
-   * connection reopened only by `request()` (after a drop, or a late reply after `close()`)
-   * drops its notifications instead of piling them up.
+   * connected. Armed by `checkReachable()` (startup), `subscribe()`, and a drop while subscribed
+   * (the receive loop subscribes again after its backoff, and a reply sent meanwhile reopens the
+   * connection). `null` otherwise, so a connection reopened by a late reply after `close()` or
+   * an unsubscribe drops its notifications instead of piling them up. At most `EARLY_EVENTS_MAX`.
    */
   private early: ReceiveEvent[] | null = null;
   private readonly pending = new Map<number, Pending>();
@@ -121,11 +124,24 @@ export class LineTransport implements SignalTransport {
     return (await result) as T;
   }
 
-  /** One subscriber at a time: a second `subscribe()` replaces the first listener. */
-  async subscribe(listener: EventListener): Promise<EventSubscription> {
+  /**
+   * One subscriber at a time: a second `subscribe()` replaces the first. signal-cli's line protocol
+   * has no event IDs or replay, so `options.lastEventId` is ignored and events carry no ID.
+   */
+  async subscribe(listener: EventListener, options: SubscribeOptions = {}): Promise<EventSubscription> {
+    const { signal } = options;
+    signal?.throwIfAborted();
     this.early ??= [];
-    await this.connect();
-    this.listener = listener;
+    // ponytail: an abort stops waiting for the connect, not the connect itself; `close()` still
+    // awaits it, which for a TCP host that never answers is the OS connect timeout.
+    await abortable(this.connect(), signal);
+    // Its own identity, so closing an older subscription of the same listener (a reconnect) leaves this one alone.
+    const own: EventListener = {
+      onEvent: (event) => listener.onEvent(event),
+      onError: (error) => listener.onError(error),
+      onClosed: () => listener.onClosed(),
+    };
+    this.listener = own;
     const early = this.early ?? [];
     this.early = [];
     for (const event of early) {
@@ -133,14 +149,15 @@ export class LineTransport implements SignalTransport {
     }
     // Only stops delivery: running handlers may still reply over this connection while the
     // adapter drains them; `close()` releases the connection afterwards.
-    return {
-      close: async () => {
-        if (this.listener === listener) {
-          this.listener = undefined;
-          this.early = null;
-        }
-      },
+    const stop = async () => {
+      signal?.removeEventListener("abort", stop);
+      if (this.listener === own) {
+        this.listener = undefined;
+        this.early = null;
+      }
     };
+    signal?.addEventListener("abort", stop, { once: true });
+    return { close: stop };
   }
 
   async close(): Promise<void> {
@@ -185,7 +202,8 @@ export class LineTransport implements SignalTransport {
       this.connection = undefined;
       const listener = this.listener;
       this.listener = undefined;
-      this.early = null;
+      // A drop of a connection a reply reopened (no listener yet) keeps what is already buffered.
+      this.early = listener ? [] : this.early;
       if (reason && listener) {
         listener.onError(reason);
         listener.onClosed();
@@ -230,8 +248,9 @@ export class LineTransport implements SignalTransport {
         this.listener?.onError(new ValidationError(ADAPTER_NAME, "Ignoring a signal-cli receive notification without params"));
       } else if (this.listener) {
         this.deliver(params as ReceiveEvent);
-      } else {
-        this.early?.push(params as ReceiveEvent);
+      } else if (this.early && this.early.length < EARLY_EVENTS_MAX) {
+        // ponytail: drops the newest past the cap; nobody is subscribed to tell. 1 000 as signal-cli 0.14.9's HTTP replay buffer (SseEventBuffer.MAX_EVENTS).
+        this.early.push(params as ReceiveEvent);
       }
       return;
     }
@@ -266,6 +285,18 @@ export class LineTransport implements SignalTransport {
       this.listener?.onError(error);
     }
   }
+}
+
+/** `promise`, or a rejection with the abort reason once `signal` aborts first. */
+function abortable<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) {
+    return promise;
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 
 function validate(options: LineTransportOptions): void {
@@ -305,6 +336,9 @@ async function connectSocket(socket: Socket, endpoint: string): Promise<Connecti
     socket.destroy();
     throw unreachable(`connecting to ${endpoint}`, error);
   }
+  // Without it a TCP connection that died without closing (NAT timeout, a host gone) goes unnoticed
+  // for good; the OS then gives up after its keep-alive probes. A no-op on a Unix socket.
+  socket.setKeepAlive(true, 30_000);
   let closing = false;
   let failure: Error | undefined;
   socket.on("error", (error) => {
