@@ -202,7 +202,8 @@ export class LineTransport implements SignalTransport {
       this.connection = undefined;
       const listener = this.listener;
       this.listener = undefined;
-      this.early = listener ? [] : null;
+      // A drop of a connection a reply reopened (no listener yet) keeps what is already buffered.
+      this.early = listener ? [] : this.early;
       if (reason && listener) {
         listener.onError(reason);
         listener.onClosed();
@@ -248,7 +249,7 @@ export class LineTransport implements SignalTransport {
       } else if (this.listener) {
         this.deliver(params as ReceiveEvent);
       } else if (this.early && this.early.length < EARLY_EVENTS_MAX) {
-        // ponytail: drops the newest past the cap; nobody is subscribed to tell. 1 000 is signal-cli's own replay depth.
+        // ponytail: drops the newest past the cap; nobody is subscribed to tell. 1 000 as signal-cli 0.14.9's HTTP replay buffer (SseEventBuffer.MAX_EVENTS).
         this.early.push(params as ReceiveEvent);
       }
       return;

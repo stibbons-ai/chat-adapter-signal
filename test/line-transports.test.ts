@@ -521,6 +521,31 @@ describe("reconnect on line transports", () => {
     expect(events).toHaveLength(1);
   });
 
+  it("keeps the buffered events through a second drop before the next subscribe, at most 1 000", async () => {
+    const fake = await startFake();
+    const port = await fake.listenTcp();
+    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port }, BOT_ACCOUNT);
+    cleanups.push(() => transport.close());
+    const events: unknown[] = [];
+    const closed = vi.fn();
+    const listener = { onEvent: (event: unknown) => events.push(event), onError: () => {}, onClosed: closed };
+    await transport.subscribe(listener);
+    await expect.poll(() => fake.openLineConnections).toBe(1);
+    fake.dropLineConnections();
+    await expect.poll(() => closed.mock.calls.length).toBe(1);
+
+    await transport.request("version");
+    for (let i = 0; i < 1_001; i++) {
+      fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: `m${i}` }));
+    }
+    await transport.request("version");
+    fake.dropLineConnections();
+    await expect.poll(() => fake.openLineConnections).toBe(0);
+    await transport.subscribe(listener);
+
+    expect(events).toHaveLength(1_000);
+  });
+
   it("closing an older subscription of the same listener leaves the newer one delivering", async () => {
     const fake = await startFake();
     const port = await fake.listenTcp();
