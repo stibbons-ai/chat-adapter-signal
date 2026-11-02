@@ -1,0 +1,53 @@
+{
+  "name": "@stibbons/chat-adapter-signal",
+  "version": "0.0.0",
+  "description": "Signal adapter for the Chat SDK, built on a separately installed signal-cli",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stibbons-ai/chat-adapter-signal.git"
+  },
+  "keywords": [
+    "chat",
+    "chat-sdk",
+    "signal",
+    "signal-cli",
+    "adapter"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "pack:check": "npm pack --dry-run",
+    "check": "npm run typecheck && npm test && npm run pack:check",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@chat-adapter/shared": "^4.43.0"
+  },
+  "peerDependencies": {
+    "chat": "^4.43.0"
+  },
+  "devDependencies": {
+    "@chat-adapter/state-memory": "^4.43.0",
+    "@types/node": "^24.19.2",
+    "chat": "^4.43.0",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5"
+  }
+}
