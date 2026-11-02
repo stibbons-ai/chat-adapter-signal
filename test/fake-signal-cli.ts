@@ -5,6 +5,8 @@ import { json } from "node:stream/consumers";
 
 export const BOT_ACCOUNT = "+15550000001";
 export const BOT_ACI = "00000000-0000-4000-8000-000000000001";
+export const ALICE_ACI = "a1b2c3d4-0000-4000-8000-00000000a11c";
+export const BOB_ACI = "b0b0b0b0-0000-4000-8000-000000000b0b";
 
 export interface RecordedRequest {
   path: string;
@@ -250,6 +252,42 @@ export function directTextEnvelope(options: {
       message: options.text,
       expiresInSeconds: 0,
       viewOnce: false,
+    },
+  };
+}
+
+/**
+ * A Group text envelope as signal-cli 0.14.9 emits it: `groupInfo.groupId` in
+ * standard base64, native @mentions as `mentions[]` (the text holds U+FFFC at
+ * each mention), a quote-reply as `quote`.
+ */
+export function groupTextEnvelope(options: {
+  aci: string;
+  groupId: string;
+  text: string;
+  mentions?: Array<{ aci: string; start: number }>;
+  quoteAuthor?: string;
+  timestamp?: number;
+}) {
+  const envelope = directTextEnvelope({ aci: options.aci, text: options.text, ...(options.timestamp ? { timestamp: options.timestamp } : {}) });
+  return {
+    ...envelope,
+    dataMessage: {
+      ...envelope.dataMessage,
+      groupInfo: { groupId: options.groupId, groupName: "Test Group", revision: 3, type: "DELIVER" },
+      ...(options.mentions && {
+        mentions: options.mentions.map(({ aci, start }) => ({ name: aci, number: null, uuid: aci, start, length: 1 })),
+      }),
+      ...(options.quoteAuthor && {
+        quote: {
+          id: 1_700_000_000_000,
+          author: options.quoteAuthor,
+          authorNumber: null,
+          authorUuid: options.quoteAuthor,
+          text: "quoted",
+          attachments: [],
+        },
+      }),
     },
   };
 }

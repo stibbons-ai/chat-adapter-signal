@@ -2,9 +2,8 @@ import { createMemoryState } from "@chat-adapter/state-memory";
 import { Chat } from "chat";
 import { afterEach, expect, it } from "vitest";
 import { createSignalAdapter } from "../src/index.js";
-import { BOT_ACCOUNT, BOT_ACI, directTextEnvelope, FakeSignalCli } from "./fake-signal-cli.js";
+import { ALICE_ACI, BOB_ACI, BOT_ACCOUNT, BOT_ACI, directTextEnvelope, FakeSignalCli, groupTextEnvelope } from "./fake-signal-cli.js";
 
-const ALICE_ACI = "a1b2c3d4-0000-4000-8000-00000000a11c";
 
 let cleanup: (() => Promise<void>) | undefined;
 afterEach(async () => {
@@ -47,4 +46,46 @@ it("echo bot: a user's 1:1 message is echoed back to that user", async () => {
     { account: BOT_ACCOUNT, recipient: [ALICE_ACI], message: "echo: ping" },
   ]);
   expect(replies).toEqual([`${BOT_ACI}:1700000000000`]);
+});
+
+/**
+ * Walkthrough for a group member: chatter without a Mention leaves the bot
+ * quiet; an @mention gets a reply in the Group, and so does a later
+ * quote-reply to that answer. Read back from signal-cli what went out.
+ */
+it("group bot: answers in the Group only when mentioned or quote-replied to", async () => {
+  const signalCli = await FakeSignalCli.start();
+  const groupId = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+
+  const chat = new Chat({
+    userName: "echo-bot",
+    adapters: {
+      signal: createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: signalCli.url } }),
+    },
+    state: createMemoryState(),
+    concurrency: "queue",
+    logger: "silent",
+  });
+  const answered: string[] = [];
+  chat.onNewMention(async (thread, message) => {
+    await thread.post(`echo: ${message.text.replace("￼", "@echo-bot")}`);
+    answered.push(message.text);
+  });
+  await chat.initialize();
+  cleanup = async () => {
+    await chat.shutdown();
+    await signalCli.stop();
+  };
+
+  signalCli.injectEnvelope(groupTextEnvelope({ aci: BOB_ACI, groupId, text: "lunch, echo-bot?" }));
+  signalCli.injectEnvelope(groupTextEnvelope({ aci: ALICE_ACI, groupId, text: "￼ ping", mentions: [{ aci: BOT_ACI, start: 0 }] }));
+  await expect.poll(() => answered.length).toBe(1);
+  signalCli.injectEnvelope(groupTextEnvelope({ aci: BOB_ACI, groupId, text: "pong?", quoteAuthor: BOT_ACI }));
+  await expect.poll(() => answered.length).toBe(2);
+
+  expect(signalCli.rpcRequests("send").map((request) => request.params)).toEqual([
+    { account: BOT_ACCOUNT, groupId, message: "echo: @echo-bot ping" },
+    { account: BOT_ACCOUNT, groupId, message: "echo: pong?" },
+  ]);
+  expect(answered).toEqual(["￼ ping", "pong?"]);
 });

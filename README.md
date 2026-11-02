@@ -4,8 +4,8 @@ Signal adapter for the [Chat SDK](https://github.com/vercel/chat). It talks to a
 [signal-cli](https://github.com/AsamK/signal-cli) daemon that you install and run
 yourself; this package never bundles, downloads or installs signal-cli or libsignal.
 
-> Early development: 1:1 text messages in and out over signal-cli's HTTP daemon.
-> Groups, formatting, reactions, attachments and the other transports are not supported yet.
+> Early development: 1:1 and Group text messages in and out over signal-cli's HTTP daemon.
+> Formatting, reactions, attachments and the other transports are not supported yet.
 
 ## Requirements
 
@@ -78,7 +78,20 @@ Users are keyed by their ACI, never their phone number; profile name and phone n
 are display data only (`author.fullName`).
 
 - Thread and channel ID of a 1:1 Conversation: `signal:dm:<ACI>`
+- Thread and channel ID of a Group: `signal:group:<groupId>`, the Groups v2 ID in base64url without padding
+  (signal-cli prints it in standard base64); legacy (v1) groups are not supported
 - Message ID: `<authorACI>:<timestamp>`; the bot's own messages use the Bot Account's ACI.
+
+## Groups and Mentions
+
+Each Group is one Conversation, so `thread.subscribe()` covers all of its messages and `thread.post`
+sends to the whole Group. Every Group message the adapter hands to Chat has `message.isMention` set: `true` for a native Signal
+@mention of the Bot Account or a quote-reply to one of its messages, which fires `onNewMention`;
+`false` otherwise, including when the bot's name only appears as text. The mention itself shows as
+U+FFFC in `message.text` for now.
+
+Not user input, so never handed to Chat: sync messages from the Bot Account's own linked devices,
+edits, remote deletes, reactions, receipts, typing indicators, story replies, and legacy-group messages.
 
 ## Errors
 
