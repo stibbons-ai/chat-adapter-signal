@@ -70,11 +70,14 @@ export class HttpTransport implements SignalTransport {
     if (!response.ok) {
       throw fromHttpStatus(response, `signal-cli JSON-RPC ${method}`);
     }
-    let payload: JsonRpcResponse<T>;
+    let payload: JsonRpcResponse<T> | null;
     try {
-      payload = (await response.json()) as JsonRpcResponse<T>;
+      payload = (await response.json()) as JsonRpcResponse<T> | null;
     } catch (error) {
       throw new NetworkError(ADAPTER_NAME, `signal-cli JSON-RPC ${method} returned an unreadable response`, error as Error);
+    }
+    if (typeof payload !== "object" || payload === null || !("result" in payload || "error" in payload)) {
+      throw new NetworkError(ADAPTER_NAME, `signal-cli JSON-RPC ${method} returned a malformed response`);
     }
     if (payload.error) {
       throw fromJsonRpcError(payload.error, method);
@@ -100,14 +103,25 @@ export class HttpTransport implements SignalTransport {
           if (event.event !== "receive") {
             continue;
           }
-          let parsed: ReceiveEvent;
+          let parsed: unknown;
           try {
-            parsed = JSON.parse(event.data) as ReceiveEvent;
+            parsed = JSON.parse(event.data);
           } catch {
-            listener.onError(new ValidationError(ADAPTER_NAME, `Ignoring malformed signal-cli event: ${event.data}`));
+            // Never log the payload or the parse error (V8 quotes the input): both carry message text and phone numbers.
+            listener.onError(
+              new ValidationError(ADAPTER_NAME, `Ignoring signal-cli event that is not valid JSON (${event.data.length} chars)`),
+            );
             continue;
           }
-          await listener.onEvent(parsed);
+          if (typeof parsed !== "object" || parsed === null) {
+            listener.onError(new ValidationError(ADAPTER_NAME, "Ignoring signal-cli event that is not a JSON object"));
+            continue;
+          }
+          try {
+            listener.onEvent(parsed as ReceiveEvent);
+          } catch (error) {
+            listener.onError(error);
+          }
         }
       } catch (error) {
         if (abort.signal.aborted) {

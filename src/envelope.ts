@@ -51,6 +51,7 @@ export function parseDirectTextMessage(
   if (
     !isAci(aci) ||
     !data ||
+    !Number.isSafeInteger(data.timestamp) ||
     typeof data.message !== "string" ||
     data.groupInfo ||
     data.reaction ||

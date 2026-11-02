@@ -6,7 +6,7 @@ import {
   ValidationError,
 } from "@chat-adapter/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createSignalAdapter } from "../src/index.js";
+import { createSignalAdapter, type SignalTransportConfig } from "../src/index.js";
 import { BOT_ACCOUNT, BOT_ACI, directTextEnvelope, FakeSignalCli, type JsonRpcError } from "./fake-signal-cli.js";
 import { startBot, type Bot } from "./helpers.js";
 
@@ -65,6 +65,35 @@ describe("configuration", () => {
       expect.objectContaining({ name: "ValidationError", message: expect.stringContaining("SIGNAL_CLI_URL") }),
     );
   });
+
+  it("rejects an unsupported transport type by name", () => {
+    const transport = { type: "socket", path: "/run/signal-cli.sock" } as unknown as SignalTransportConfig;
+
+    expect(() => createSignalAdapter({ account: BOT_ACCOUNT, transport })).toThrow(
+      expect.objectContaining({ name: "ValidationError", message: 'Unsupported transport type "socket"' }),
+    );
+  });
+
+  it("accepts a URL with a trailing slash", async () => {
+    const fake = await FakeSignalCli.start();
+    await bot({ fake, config: { account: BOT_ACCOUNT, transport: { type: "http", url: `${fake.url}/` } } });
+
+    expect(fake.requests.map((request) => request.path.split("?")[0])).toEqual(
+      expect.arrayContaining(["/api/v1/check", "/api/v1/rpc", "/api/v1/events"]),
+    );
+    expect(fake.requests.every((request) => !request.path.startsWith("//"))).toBe(true);
+  });
+
+  it("accepts the Bot Account as an ACI in any case, with or without dashes", async () => {
+    const botAci = "abcdef01-2345-4678-9abc-def012345678";
+    for (const account of [botAci, botAci.toUpperCase(), botAci.replaceAll("-", "").toUpperCase()]) {
+      const fake = await FakeSignalCli.start();
+      fake.accounts = [{ number: null, aci: botAci }];
+      const { adapter } = await bot({ fake, config: { account, transport: { type: "http", url: fake.url } } });
+
+      expect(adapter.botUserId, account).toBe(botAci);
+    }
+  });
 });
 
 describe("transport headers", () => {
@@ -113,14 +142,14 @@ describe("initialize", () => {
     );
   });
 
-  it("warns when signal-cli is older than the tested minimum", async () => {
+  it.each(["0.13.22", "0.14.8", "unknown"])("warns when signal-cli reports version %j, below the tested minimum", async (version) => {
     const fake = await FakeSignalCli.start();
-    fake.version = "0.13.22";
+    fake.version = version;
     const { logger } = await bot({ fake });
 
     const warnings = logger.entries.filter((entry) => entry.level === "warn");
     expect(warnings).toEqual([
-      expect.objectContaining({ message: expect.stringMatching(/signal-cli 0\.13\.22 is older than 0\.14\.9/) }),
+      expect.objectContaining({ message: `signal-cli ${version} is older than 0.14.9, the oldest version this adapter is tested with; update signal-cli` }),
     ]);
   });
 
@@ -155,10 +184,9 @@ describe("inbound 1:1 messages", () => {
     fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, number: "+15551230001", text: "one" }));
     fake.injectEnvelope(directTextEnvelope({ aci: BOB_ACI, text: "two" }));
 
-    const first = (await nextDirectMessage()).message.author;
-    const second = (await nextDirectMessage()).message.author;
-    expect([first.userId, first.fullName]).toEqual([ALICE_ACI, "+15551230001"]);
-    expect([second.userId, second.fullName]).toEqual([BOB_ACI, BOB_ACI]);
+    const authors = [(await nextDirectMessage()).message.author, (await nextDirectMessage()).message.author];
+    const byUser = Object.fromEntries(authors.map((author) => [author.userId, author.fullName]));
+    expect(byUser).toEqual({ [ALICE_ACI]: "+15551230001", [BOB_ACI]: BOB_ACI });
   });
 
   it("ignores envelopes outside 1:1 text without stopping the stream", async () => {
@@ -167,6 +195,10 @@ describe("inbound 1:1 messages", () => {
     const { dataMessage, ...withoutData } = base;
     fake.injectEnvelope({ ...base, dataMessage: { ...dataMessage, groupInfo: { groupId: "Z3JvdXA=", type: "DELIVER" } } });
     fake.injectEnvelope({ ...base, dataMessage: { ...dataMessage, message: null, reaction: { emoji: "👍" } } });
+    fake.injectEnvelope({ ...base, dataMessage: { ...dataMessage, message: null, remoteDelete: { timestamp: 1 } } });
+    fake.injectEnvelope({ ...base, dataMessage: { ...dataMessage, storyContext: { authorNumber: null, authorUuid: BOB_ACI, sentTimestamp: 1 } } });
+    fake.injectEnvelope({ ...base, dataMessage: { message: "no timestamp" } });
+    fake.injectEnvelope({ ...base, dataMessage: { ...dataMessage, timestamp: 1.5 } });
     fake.injectEnvelope({ ...withoutData, syncMessage: { sentMessage: { destinationUuid: ALICE_ACI, message: "own" } } });
     fake.injectEnvelope({ ...withoutData, editMessage: { targetSentTimestamp: 1, dataMessage } });
     fake.injectEnvelope({ ...withoutData, receiptMessage: { when: 1, isDelivery: true, timestamps: [1] } });
@@ -185,6 +217,111 @@ describe("inbound 1:1 messages", () => {
     await fake.injectEnvelopeInPieces(directTextEnvelope({ aci: ALICE_ACI, text }), 7);
 
     expect((await nextDirectMessage()).message.text).toBe(text);
+  });
+});
+
+describe("event stream robustness", () => {
+  // Real delay on purpose: separate writes must reach the adapter's socket as separate chunks.
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+  it("handles other Conversations while one handler is still running, and disconnects without waiting for it", async () => {
+    const { fake, chat, adapter, nextDirectMessage } = await bot();
+    let release!: () => void;
+    const aliceBlocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let aliceDone = false;
+    chat.onDirectMessage(async (_thread, message) => {
+      if (message.author.userId === ALICE_ACI) {
+        await aliceBlocked;
+        aliceDone = true;
+      }
+    });
+
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "slow" }));
+    expect((await nextDirectMessage()).message.text).toBe("slow");
+    fake.injectEnvelope(directTextEnvelope({ aci: BOB_ACI, text: "fast" }));
+
+    expect((await nextDirectMessage()).message.text).toBe("fast");
+    expect(aliceDone).toBe(false);
+    await adapter.disconnect();
+    expect(aliceDone).toBe(false);
+    release();
+    await expect.poll(() => aliceDone).toBe(true);
+  });
+
+  it("keeps receiving after a handler throws", async () => {
+    const { fake, chat, nextDirectMessage } = await bot();
+    chat.onDirectMessage((_thread, message) => {
+      if (message.author.userId === ALICE_ACI) {
+        throw new Error("handler bug");
+      }
+    });
+
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "boom" }));
+    await nextDirectMessage();
+    fake.injectEnvelope(directTextEnvelope({ aci: BOB_ACI, text: "after" }));
+
+    expect((await nextDirectMessage()).message.text).toBe("after");
+    expect(fake.openEventStreams).toBe(1);
+  });
+
+  it("skips a non-object event and keeps the stream open", async () => {
+    const { fake, nextDirectMessage } = await bot();
+    fake.injectRaw("event:receive\ndata:null\n\n");
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "after null" }));
+
+    expect((await nextDirectMessage()).message.text).toBe("after null");
+    expect(fake.openEventStreams).toBe(1);
+  });
+
+  it("never logs the content of a malformed event", async () => {
+    const { fake, logger, nextDirectMessage } = await bot();
+    const secret = "secret PIN 1234";
+    fake.injectRaw(`event:receive\ndata:{"envelope":{"sourceNumber":"+4366012345","dataMessage":{"message":"${secret}"\n\n`);
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "next" }));
+    await nextDirectMessage();
+
+    const logged = JSON.stringify(logger.entries, (_key, value) => (value instanceof Error ? value.message : value));
+    expect(logged).toContain("not valid JSON");
+    expect(logged).not.toContain(secret);
+    expect(logged).not.toContain("+4366012345");
+  });
+
+  it("dispatches a CR-framed event without waiting for more bytes", async () => {
+    const { fake, nextDirectMessage } = await bot();
+    const data = JSON.stringify({ account: BOT_ACCOUNT, envelope: directTextEnvelope({ aci: ALICE_ACI, text: "cr" }) });
+    fake.injectRaw(`event:receive\rdata:${data}\r\r`);
+
+    expect((await nextDirectMessage()).message.text).toBe("cr");
+  });
+
+  it("treats a CRLF split across chunks as one line end", async () => {
+    const { fake, nextDirectMessage } = await bot();
+    const data = JSON.stringify({ account: BOT_ACCOUNT, envelope: directTextEnvelope({ aci: ALICE_ACI, text: "crlf" }) });
+    fake.injectRaw("event:receive\r");
+    await tick();
+    fake.injectRaw(`\ndata:${data}\r\n\r\n`);
+
+    expect((await nextDirectMessage()).message.text).toBe("crlf");
+  });
+
+  it("warns about receive errors that come without an envelope", async () => {
+    const { fake, logger } = await bot();
+    fake.injectRaw(`event:receive\ndata:${JSON.stringify({ account: BOT_ACCOUNT, exception: { message: "decrypt failed" } })}\n\n`);
+
+    await expect
+      .poll(() => logger.entries.find((entry) => entry.message === "signal-cli reported a receive error"))
+      .toMatchObject({ level: "warn" });
+  });
+
+  it("warns when signal-cli closes the event stream", async () => {
+    const { fake, logger } = await bot();
+    fake.closeEventStreams();
+
+    await expect
+      .poll(() => logger.entries.find((entry) => entry.message.startsWith("signal-cli event stream closed")))
+      .toMatchObject({ level: "warn" });
   });
 });
 
@@ -306,8 +443,17 @@ describe("errors", () => {
       expected: ValidationError,
     },
     {
-      kind: "network",
+      kind: "network (I/O error)",
       error: { code: -3, message: "Failed to send: connection reset" },
+      expected: NetworkError,
+    },
+    {
+      kind: "network (every recipient failed on the network)",
+      error: {
+        code: -1,
+        message: "Failed to send message",
+        data: { response: { timestamp: 1, results: [{ type: "NETWORK_FAILURE", recipientAddress: { uuid: ALICE_ACI } }] } },
+      },
       expected: NetworkError,
     },
   ] as Array<{ kind: string; error: JsonRpcError; expected: new (...args: never[]) => Error; fields?: object }>)(
@@ -327,5 +473,43 @@ describe("errors", () => {
     await fake.stop();
 
     await expect(post(chat)).rejects.toBeInstanceOf(NetworkError);
+  });
+
+  it("rejects a send result without a message timestamp as a network error", async () => {
+    const { fake, chat } = await bot();
+    fake.replyRpcRaw("send", { jsonrpc: "2.0", id: 1, result: { results: [] } });
+
+    await expect(post(chat)).rejects.toBeInstanceOf(NetworkError);
+  });
+
+  it("rejects a JSON-RPC reply with neither result nor error as a network error", async () => {
+    const fake = await FakeSignalCli.start();
+    fake.replyRpcRaw("version", {});
+    const { chat } = await bot({ fake, initialize: false });
+
+    await expect(chat.initialize()).rejects.toThrow(
+      expect.objectContaining({ name: "NetworkError", message: expect.stringContaining("malformed response") }),
+    );
+  });
+
+  it("maps HTTP 429 with Retry-After to a rate-limit error", async () => {
+    const fake = await FakeSignalCli.start();
+    fake.httpStatus = 429;
+    fake.httpHeaders = { "Retry-After": "30" };
+    const { chat } = await bot({ fake, initialize: false });
+
+    const failure = chat.initialize();
+    await expect(failure).rejects.toBeInstanceOf(AdapterRateLimitError);
+    await expect(failure).rejects.toMatchObject({ retryAfter: 30 });
+  });
+
+  it("explains a single-account daemon, which cannot report the Bot Account's ACI", async () => {
+    const fake = await FakeSignalCli.start();
+    fake.failRpc("listAccounts", { code: -32601, message: "Method not implemented" });
+    const { chat } = await bot({ fake, initialize: false });
+
+    await expect(chat.initialize()).rejects.toThrow(
+      expect.objectContaining({ name: "ValidationError", message: expect.stringContaining("single-account mode") }),
+    );
   });
 });

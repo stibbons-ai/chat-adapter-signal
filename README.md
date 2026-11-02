@@ -61,15 +61,19 @@ are display data only (`author.fullName`).
 
 ## Errors
 
-signal-cli failures surface as `@chat-adapter/shared` errors:
+signal-cli failures surface as `@chat-adapter/shared` errors (signal-cli JSON-RPC codes in parentheses):
 
 | Error | When |
 |---|---|
-| `AuthenticationError` | HTTP 401/403 (e.g. from a reverse proxy), or the daemon does not serve the Bot Account |
+| `AuthenticationError` | HTTP 401/403 (e.g. from a reverse proxy), or the daemon does not serve the Bot Account (`-32602` "Specified account does not exist", or the account is missing from `listAccounts` at startup) |
 | `AdapterRateLimitError` | signal-cli rate-limit error (`-5`), or HTTP 429; `retryAfter` in seconds when known |
-| `ResourceNotFoundError` | The recipient is not registered with Signal |
-| `ValidationError` | Invalid request or parameters (`-32600`, `-32602`, other `-1` user errors) |
-| `NetworkError` | signal-cli unreachable, other HTTP failures, or signal-cli I/O errors (`-3`) |
+| `ResourceNotFoundError` | The recipient is not registered with Signal (`-1`) |
+| `ValidationError` | Invalid request or parameters (`-32600`, other `-32602`, other `-1` user errors); from `initialize()`, a single-account daemon (started with `-a`) |
+| `NetworkError` | signal-cli unreachable, other HTTP failures, malformed replies, signal-cli I/O errors (`-3`), or a send where every recipient failed on the network (`-1` with `NETWORK_FAILURE` results) |
+| `AdapterError` with `code` | `UNTRUSTED_IDENTITY` (`-4`), `CAPTCHA_REJECTED` (`-6`), `METHOD_NOT_FOUND` (`-32601`), `SIGNAL_CLI_ERROR` (anything else, e.g. `-32603`) |
+
+signal-cli 0.14.9 reports an I/O failure during `send` as an internal error (`-32603`, "Failed to send message: … (IOException)"),
+so it arrives as `AdapterError` with code `SIGNAL_CLI_ERROR`, not as `NetworkError`.
 
 ## License
 

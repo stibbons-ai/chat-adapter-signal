@@ -1,4 +1,4 @@
-import { AdapterError, AuthenticationError, ValidationError } from "@chat-adapter/shared";
+import { AdapterError, AuthenticationError, NetworkError, ValidationError } from "@chat-adapter/shared";
 import {
   NotImplementedError,
   type Adapter,
@@ -22,12 +22,19 @@ import { ADAPTER_NAME } from "./errors.js";
 import { SignalFormatConverter } from "./format.js";
 import { HttpTransport, type HttpTransportOptions } from "./transport/http.js";
 import type { EventSubscription, SignalTransport } from "./transport/types.js";
-import { decodeThreadId, encodeMessageId, encodeThreadId, type SignalThreadId } from "./thread-id.js";
+import {
+  decodeThreadId,
+  encodeMessageId,
+  encodeThreadId,
+  isAci,
+  normalizeAci,
+  type SignalThreadId,
+} from "./thread-id.js";
 
 /** Oldest signal-cli release this adapter is tested against. */
 export const MIN_SIGNAL_CLI_VERSION = "0.14.9";
 
-/** How the adapter reaches signal-cli. Only the HTTP daemon is supported so far. */
+/** How the adapter reaches signal-cli, by `type`. Only the HTTP daemon is supported so far. */
 export type SignalTransportConfig = HttpTransportOptions;
 
 export interface SignalAdapterConfig {
@@ -66,18 +73,15 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     }
     const envUrl = process.env.SIGNAL_CLI_URL;
     const transport = config.transport ?? (envUrl ? { type: "http" as const, url: envUrl } : undefined);
-    if (!transport?.url) {
+    if (!transport) {
       throw new ValidationError(
         ADAPTER_NAME,
         'transport is required. Set SIGNAL_CLI_URL or pass `transport: { type: "http", url }`.',
       );
     }
-    if (transport.type !== "http") {
-      throw new ValidationError(ADAPTER_NAME, `Unsupported transport type ${JSON.stringify(transport.type)}`);
-    }
 
     this.account = account;
-    this.transport = new HttpTransport(transport, account);
+    this.transport = createTransport(transport, account);
     this.explicitUserName = config.userName;
     this._userName = config.userName ?? "bot";
     this.logger = config.logger;
@@ -155,11 +159,14 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   async postMessage(threadId: string, message: AdapterPostableMessage): Promise<RawMessage<SignalRawMessage>> {
     const { aci } = decodeThreadId(threadId);
     const botAci = this.requireBotAci();
-    const result = await this.transport.request<SignalSendResult>("send", {
+    const result = await this.transport.request<SignalSendResult | null>("send", {
       account: this.account,
       recipient: [aci],
       message: this.formatConverter.renderPostable(message),
     });
+    if (!(result && Number.isSafeInteger(result.timestamp))) {
+      throw new NetworkError(ADAPTER_NAME, "signal-cli send returned no message timestamp");
+    }
     return { id: encodeMessageId(botAci, result.timestamp), threadId, raw: result };
   }
 
@@ -188,7 +195,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   private async checkVersion(): Promise<void> {
-    const { version } = await this.transport.request<{ version: string }>("version");
+    const version = String((await this.transport.request<{ version?: unknown } | null>("version"))?.version);
     if (!isAtLeast(version, MIN_SIGNAL_CLI_VERSION)) {
       this.logger?.warn(
         `signal-cli ${version} is older than ${MIN_SIGNAL_CLI_VERSION}, the oldest version this adapter is tested with; update signal-cli`,
@@ -198,15 +205,15 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   /**
-   * signal-cli's `listAccounts` is the only RPC that returns an account's own
-   * ACI without asking the Signal server. It exists only on a multi-account
-   * daemon (`signal-cli daemon` without `-a`), which the per-request
-   * `account` parameter requires anyway.
+   * The Bot Account's own ACI comes from `listAccounts`, the only RPC that
+   * returns it without asking the Signal server. signal-cli serves it only on
+   * a multi-account daemon (`signal-cli daemon` without `-a`); a
+   * single-account daemon answers METHOD_NOT_FOUND.
    */
   private async resolveBotAci(): Promise<string> {
-    let accounts: SignalAccount[];
+    let accounts: SignalAccount[] | null;
     try {
-      accounts = await this.transport.request<SignalAccount[]>("listAccounts");
+      accounts = await this.transport.request<SignalAccount[] | null>("listAccounts");
     } catch (error) {
       if (error instanceof AdapterError && error.code === "METHOD_NOT_FOUND") {
         throw new ValidationError(
@@ -216,8 +223,13 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       }
       throw error;
     }
-    const self = accounts.find((entry) => entry.number === this.account || entry.aci === this.account);
-    if (!self?.aci) {
+    if (!Array.isArray(accounts)) {
+      throw new NetworkError(ADAPTER_NAME, "signal-cli JSON-RPC listAccounts returned a malformed response");
+    }
+    // signal-cli accepts an ACI in any case, with or without dashes.
+    const accountAci = normalizeAci(this.account);
+    const self = accounts.find((entry) => entry.number === this.account || (accountAci && entry.aci === accountAci));
+    if (!isAci(self?.aci)) {
       throw new AuthenticationError(
         ADAPTER_NAME,
         `Bot Account ${this.account} is not registered or linked on the signal-cli daemon at ${this.transport.endpoint}`,
@@ -233,7 +245,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     return this._botUserId;
   }
 
-  private async handleEvent(event: ReceiveEvent): Promise<void> {
+  private handleEvent(event: ReceiveEvent): void {
     const { envelope } = event;
     if (!envelope) {
       this.logger?.warn("signal-cli reported a receive error", { exception: event.exception });
@@ -244,11 +256,10 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       this.logger?.debug("Ignoring Signal envelope outside the supported message types");
       return;
     }
-    try {
-      await this.chat.processMessage(this, message.threadId, message);
-    } catch {
-      // Chat already logs handler failures; one failing handler must not stop the event stream.
-    }
+    // Not awaited: one slow handler must not hold up other Conversations, and
+    // Chat's concurrency strategies need to see overlapping messages. Chat
+    // logs handler failures itself; the catch only prevents an unhandled rejection.
+    this.chat.processMessage(this, message.threadId, message).catch(() => {});
   }
 }
 
@@ -270,4 +281,19 @@ function isAtLeast(version: string, minimum: string): boolean {
 
 export function createSignalAdapter(config?: SignalAdapterConfig): SignalAdapter {
   return new SignalAdapter(config);
+}
+
+function createTransport(config: SignalTransportConfig, account: string): SignalTransport {
+  switch (config.type) {
+    case "http":
+      if (typeof config.url !== "string" || config.url === "") {
+        throw new ValidationError(ADAPTER_NAME, 'transport.url is required for `{ type: "http" }`.');
+      }
+      return new HttpTransport(config, account);
+    default: {
+      // Unreachable for typed callers; JavaScript callers can still pass any `type`.
+      const unsupported: never = config.type;
+      throw new ValidationError(ADAPTER_NAME, `Unsupported transport type ${JSON.stringify(unsupported)}`);
+    }
+  }
 }

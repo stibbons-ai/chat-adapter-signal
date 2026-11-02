@@ -15,19 +15,22 @@ export async function* parseEventStream(body: ReadableStream<Uint8Array>): Async
   let buffer = "";
   let event = "";
   let data: string[] = [];
+  // The previous chunk ended in "\r": that ended a line, and a "\n" opening this chunk belongs to it.
+  let skipLeadingLineFeed = false;
 
   for await (const chunk of body.pipeThrough(new TextDecoderStream())) {
     buffer += chunk;
-    let start = 0;
-    lineEnd.lastIndex = 0;
+    if (buffer === "") {
+      continue;
+    }
+    let start: number = skipLeadingLineFeed && buffer.startsWith("\n") ? 1 : 0;
+    skipLeadingLineFeed = false;
+    lineEnd.lastIndex = start;
     let match: RegExpExecArray | null;
     while ((match = lineEnd.exec(buffer)) !== null) {
-      // A trailing "\r" may be the first half of a "\r\n" split across chunks.
-      if (match[0] === "\r" && match.index === buffer.length - 1) {
-        break;
-      }
       const line = buffer.slice(start, match.index);
       start = match.index + match[0].length;
+      skipLeadingLineFeed = match[0] === "\r" && start === buffer.length;
 
       if (line === "") {
         if (data.length > 0) {

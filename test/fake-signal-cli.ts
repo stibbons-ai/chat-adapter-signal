@@ -34,11 +34,14 @@ export class FakeSignalCli {
   accounts: Array<{ number: string | null; aci: string | null }> = [{ number: BOT_ACCOUNT, aci: BOT_ACI }];
   /** Status for `/api/v1/check` and every other endpoint, e.g. 401 to act like an auth proxy. */
   httpStatus = 200;
+  /** Response headers sent with a non-200 `httpStatus`, e.g. `Retry-After`. */
+  httpHeaders: Record<string, string> = {};
 
   private readonly server: Server;
   private readonly eventStreams = new Set<ServerResponse>();
   private readonly rpcHandlers = new Map<string, RpcHandler>();
   private readonly rpcErrors = new Map<string, JsonRpcError>();
+  private readonly rawRpcReplies = new Map<string, unknown>();
   private readonly eventIdPrefix = `${Date.now()}-`;
   private nextEventSequence = 1;
   private nextSendTimestamp = 1_700_000_000_000;
@@ -82,6 +85,11 @@ export class FakeSignalCli {
     this.rpcErrors.set(method, error);
   }
 
+  /** Answer every later call of `method` with this exact JSON body, valid JSON-RPC or not (as a broken proxy might). */
+  replyRpcRaw(method: string, body: unknown): void {
+    this.rawRpcReplies.set(method, body);
+  }
+
   private receiveEvent(envelope: unknown): string {
     const data = JSON.stringify({ account: BOT_ACCOUNT, envelope });
     return `id:${this.eventIdPrefix}${this.nextEventSequence++}\nevent:receive\ndata:${data}\n\n`;
@@ -103,6 +111,20 @@ export class FakeSignalCli {
         stream.write(bytes.subarray(offset, offset + size));
       }
       await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+  }
+
+  /** Writes raw bytes to every open event stream, for framing and malformed-data cases. */
+  injectRaw(text: string): void {
+    for (const stream of this.eventStreams) {
+      stream.write(text);
+    }
+  }
+
+  /** Ends every open event stream from the server side, as a daemon restart would. */
+  closeEventStreams(): void {
+    for (const stream of this.eventStreams) {
+      stream.end();
     }
   }
 
@@ -129,7 +151,7 @@ export class FakeSignalCli {
     this.requests.push(recorded);
 
     if (this.httpStatus !== 200) {
-      response.writeHead(this.httpStatus).end();
+      response.writeHead(this.httpStatus, this.httpHeaders).end();
       return;
     }
 
@@ -163,8 +185,10 @@ export class FakeSignalCli {
   private respondRpc(body: NonNullable<RecordedRequest["body"]>, response: ServerResponse): void {
     const handler = this.rpcHandlers.get(body.method);
     const error = this.rpcErrors.get(body.method);
-    let reply: Record<string, unknown>;
-    if (error) {
+    let reply: unknown;
+    if (this.rawRpcReplies.has(body.method)) {
+      reply = this.rawRpcReplies.get(body.method);
+    } else if (error) {
       reply = { jsonrpc: "2.0", id: body.id ?? null, error };
     } else if (handler) {
       reply = { jsonrpc: "2.0", id: body.id ?? null, result: handler(body.params) };

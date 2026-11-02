@@ -1,8 +1,8 @@
 import type { ReceiveEvent } from "../envelope.js";
 
 export interface EventListener {
-  /** Called for each event in order; the next event waits until this resolves. */
-  onEvent(event: ReceiveEvent): Promise<void>;
+  /** Called for each event in stream order; must not block the stream (dispatch work asynchronously). */
+  onEvent(event: ReceiveEvent): void;
   /** A malformed event (stream continues) or a stream failure (followed by `onClosed`). */
   onError(error: unknown): void;
   /** The stream ended without `close()` being called. */
