@@ -482,6 +482,45 @@ describe("reconnect on line transports", () => {
     expect(listener.onClosed).not.toHaveBeenCalled();
   });
 
+  it("an abort while still connecting rejects subscribe at once with the abort reason", async () => {
+    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port: 1 }, BOT_ACCOUNT);
+    // A connect that never answers (a TCP host that drops SYNs), released only by the cleanup.
+    let fail!: (error: Error) => void;
+    Object.assign(transport, { open: () => new Promise((_, reject) => (fail = reject)) });
+    cleanups.push(async () => {
+      fail(new Error("released"));
+      await transport.close();
+    });
+    const abort = new AbortController();
+    const subscribing = transport.subscribe({ onEvent: () => {}, onError: () => {}, onClosed: () => {} }, { signal: abort.signal });
+
+    const reason = new Error("stopping");
+    abort.abort(reason);
+
+    await expect(subscribing).rejects.toBe(reason);
+  });
+
+  it("keeps events pushed on a connection a reply reopened after a drop, for the next subscribe", async () => {
+    const fake = await startFake();
+    const port = await fake.listenTcp();
+    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port }, BOT_ACCOUNT);
+    cleanups.push(() => transport.close());
+    const events: unknown[] = [];
+    const closed = vi.fn();
+    const listener = { onEvent: (event: unknown) => events.push(event), onError: () => {}, onClosed: closed };
+    await transport.subscribe(listener);
+    await expect.poll(() => fake.openLineConnections).toBe(1);
+
+    fake.dropLineConnections();
+    await expect.poll(() => closed.mock.calls.length).toBe(1);
+    await transport.request("version"); // a handler's reply during the receive loop's backoff
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "pushed meanwhile" }));
+    await transport.request("version"); // the fake answers in order, so the notification is in by now
+    await transport.subscribe(listener);
+
+    expect(events).toHaveLength(1);
+  });
+
   it("closing an older subscription of the same listener leaves the newer one delivering", async () => {
     const fake = await startFake();
     const port = await fake.listenTcp();

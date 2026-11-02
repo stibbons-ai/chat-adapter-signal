@@ -16,8 +16,8 @@ export interface SubscribeOptions {
   /** Resume after this event: sent as `Last-Event-ID`; transports without an event buffer ignore it. */
   lastEventId?: string | undefined;
   /**
-   * Aborts a subscribe still connecting (it then rejects) or ends the stream it opened, without
-   * calling `onClosed`. Transports must honour it: the receive loop relies on it to stop.
+   * Aborts a subscribe still connecting (it then rejects) or stops delivery to the listener of the
+   * stream it opened, without calling `onClosed`. Transports must honour it: the receive loop relies on it to stop.
    */
   signal?: AbortSignal | undefined;
 }

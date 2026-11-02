@@ -140,6 +140,8 @@ line-delimited JSON-RPC has no event IDs and no replay, so nothing is resumed th
   and delivers them once it runs again.
 - A TCP connection that dies without closing is noticed only by the operating system's TCP
   keep-alive, which can take minutes.
+- At shutdown, events signal-cli pushes while running handlers drain are not handled, and on
+  these transports nothing brings them back.
 
 ## IDs
 

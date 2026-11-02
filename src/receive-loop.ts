@@ -46,8 +46,8 @@ export interface ReceiveLoopOptions {
 
 /**
  * Keeps the event stream open: reconnects with exponential backoff after a
- * drop, and resumes from the last processed event ID (stored in the Chat state
- * adapter, so it survives a Host App restart). The cursor advances only once
+ * drop, and on HTTP resumes from the last processed event ID (stored in the Chat
+ * state adapter, so it survives a Host App restart; line transports have no IDs). The cursor advances only once
  * an event and every event before it were processed; replayed events that
  * were already processed or are still running are skipped.
  */
@@ -263,7 +263,7 @@ export class ReceiveLoop {
           // No ID yet (HTTP before the first event) or none at all (line transports): signal-cli replays nothing.
           // An unknown ID would make the HTTP daemon replay its whole buffer, from before this start.
           this.options.logger?.warn(
-            "Reconnected to the signal-cli event stream without an event ID to resume from; events missed while disconnected are not replayed",
+            "Reconnected to the signal-cli event stream without an event ID to resume from; signal-cli replays nothing it pushed while disconnected",
           );
         } else {
           this.options.logger?.info("Reconnected to the signal-cli event stream");

@@ -33,6 +33,8 @@ export type LineTransportOptions = SpawnTransportOptions | SocketTransportOption
 
 /** How long `close()` waits for a spawned signal-cli to exit after SIGTERM before sending SIGKILL. */
 const KILL_AFTER_MS = 5_000;
+/** Most notifications kept for a subscriber that has not (re)subscribed yet. */
+const EARLY_EVENTS_MAX = 1_000;
 /** Longest stderr excerpt quoted in an unexpected-exit error. */
 const STDERR_EXCERPT_CHARS = 300;
 
@@ -75,9 +77,10 @@ export class LineTransport implements SignalTransport {
   private listener: EventListener | undefined;
   /**
    * Notifications that arrived before `subscribe()`: signal-cli starts pushing as soon as it is
-   * connected. Armed by `checkReachable()` (startup) and `subscribe()`; `null` otherwise, so a
-   * connection reopened only by `request()` (after a drop, or a late reply after `close()`)
-   * drops its notifications instead of piling them up.
+   * connected. Armed by `checkReachable()` (startup), `subscribe()`, and a drop while subscribed
+   * (the receive loop subscribes again after its backoff, and a reply sent meanwhile reopens the
+   * connection). `null` otherwise, so a connection reopened by a late reply after `close()` or
+   * an unsubscribe drops its notifications instead of piling them up. At most `EARLY_EVENTS_MAX`.
    */
   private early: ReceiveEvent[] | null = null;
   private readonly pending = new Map<number, Pending>();
@@ -199,7 +202,7 @@ export class LineTransport implements SignalTransport {
       this.connection = undefined;
       const listener = this.listener;
       this.listener = undefined;
-      this.early = null;
+      this.early = listener ? [] : null;
       if (reason && listener) {
         listener.onError(reason);
         listener.onClosed();
@@ -244,8 +247,9 @@ export class LineTransport implements SignalTransport {
         this.listener?.onError(new ValidationError(ADAPTER_NAME, "Ignoring a signal-cli receive notification without params"));
       } else if (this.listener) {
         this.deliver(params as ReceiveEvent);
-      } else {
-        this.early?.push(params as ReceiveEvent);
+      } else if (this.early && this.early.length < EARLY_EVENTS_MAX) {
+        // ponytail: drops the newest past the cap; nobody is subscribed to tell. 1 000 is signal-cli's own replay depth.
+        this.early.push(params as ReceiveEvent);
       }
       return;
     }
