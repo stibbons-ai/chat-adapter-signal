@@ -9,6 +9,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSignalAdapter, type SignalTransportConfig } from "../src/index.js";
 import {
   BOT_ACCOUNT,
+  ALICE_ACI,
+  BOB_ACI,
   BOT_ACI,
   directTextEnvelope,
   FakeSignalCli,
@@ -17,8 +19,6 @@ import {
 } from "./fake-signal-cli.js";
 import { startBot, type Bot } from "./helpers.js";
 
-const ALICE_ACI = "a1b2c3d4-0000-4000-8000-00000000a11c";
-const BOB_ACI = "b0b0b0b0-0000-4000-8000-000000000b0b";
 
 const bots: Bot[] = [];
 async function bot(options?: Parameters<typeof startBot>[0]): Promise<Bot> {

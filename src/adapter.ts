@@ -13,7 +13,7 @@ import {
   type ThreadInfo,
 } from "chat";
 import {
-  parseDirectTextMessage,
+  parseTextMessage,
   type ReceiveEvent,
   type SignalRawMessage,
   type SignalSendResult,
@@ -202,9 +202,9 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   parseMessage(raw: SignalRawMessage): Message<SignalRawMessage> {
-    const message = "sourceUuid" in raw ? parseDirectTextMessage(raw, this.formatConverter, this._botUserId) : null;
+    const message = "sourceUuid" in raw ? parseTextMessage(raw, this.formatConverter, this._botUserId) : null;
     if (!message) {
-      throw new ValidationError(ADAPTER_NAME, "Only 1:1 text envelopes can be parsed into messages");
+      throw new ValidationError(ADAPTER_NAME, "Only 1:1 and Groups v2 text envelopes can be parsed into messages");
     }
     return message;
   }
@@ -214,11 +214,11 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   async postMessage(threadId: string, message: AdapterPostableMessage): Promise<RawMessage<SignalRawMessage>> {
-    const { aci } = decodeThreadId(threadId);
+    const conversation = decodeThreadId(threadId);
     const botAci = this.requireBotAci();
     const result = await this.transport.request<SignalSendResult | null>("send", {
       account: this.account,
-      recipient: [aci],
+      ...(conversation.type === "dm" ? { recipient: [conversation.aci] } : { groupId: conversation.groupId }),
       message: this.formatConverter.renderPostable(message),
     });
     if (!(result && Number.isSafeInteger(result.timestamp))) {
@@ -319,7 +319,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       });
       return;
     }
-    const message = envelope && parseDirectTextMessage(envelope, this.formatConverter, this._botUserId);
+    const message = envelope && parseTextMessage(envelope, this.formatConverter, this._botUserId);
     if (!(message && this.chat)) {
       this.logger?.debug("Ignoring Signal envelope outside the supported message types");
       return;
