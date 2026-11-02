@@ -114,28 +114,33 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   async initialize(chat: ChatInstance): Promise<void> {
-    // A `disconnect()` during the startup round trips bumps the generation; startup then stops
-    // instead of opening an event stream that nothing would close.
+    // A `disconnect()` during the startup round trips bumps the generation; startup then rejects
+    // instead of opening an event stream that nothing would close. Rejecting (not returning)
+    // keeps Chat from marking itself initialized, so a later `chat.initialize()` starts afresh.
     const generation = ++this.generation;
-    const cancelled = () => generation !== this.generation;
+    const throwIfCancelled = () => {
+      if (generation !== this.generation) {
+        throw new AdapterError("Signal adapter startup was cancelled by disconnect()", ADAPTER_NAME, "STARTUP_CANCELLED");
+      }
+    };
     this.chat = chat;
     this.logger ??= chat.getLogger(ADAPTER_NAME);
     this._userName = this.explicitUserName ?? chat.getUserName();
 
     await this.transport.checkReachable();
-    if (cancelled()) return;
+    throwIfCancelled();
     await this.checkVersion();
-    if (cancelled()) return;
+    throwIfCancelled();
     this._botUserId = await this.resolveBotAci();
-    if (cancelled()) return;
+    throwIfCancelled();
     const subscription = await this.transport.subscribe({
       onEvent: (event) => this.handleEvent(event),
       onError: (error) => this.logger?.error("signal-cli event stream error", { error }),
       onClosed: () => this.logger?.warn("signal-cli event stream closed; no further messages will be received"),
     });
-    if (cancelled()) {
+    if (generation !== this.generation) {
       await subscription.close();
-      return;
+      throwIfCancelled();
     }
     this.subscription = subscription;
   }

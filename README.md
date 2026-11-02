@@ -64,8 +64,11 @@ still running. With Chat's default `"drop"`, that second message is dropped (Cha
 running handlers to finish so their replies go out and their locks are released, at most
 `drainTimeoutMs`; after that it logs a warning and returns. Don't call `chat.shutdown()` from
 inside a message handler: the drain then waits for that handler itself, so shutdown takes the
-full `drainTimeoutMs`. A shutdown during `initialize()` stops the startup; an event stream
-that was already connecting is closed as soon as it opens.
+full `drainTimeoutMs`. A shutdown during `initialize()` stops the startup and makes
+`initialize()` reject with `AdapterError` code `STARTUP_CANCELLED`; an event stream that was
+already connecting is closed as soon as it opens. A later `chat.initialize()` starts afresh.
+Await `chat.initialize()` before calling `chat.shutdown()`: Chat SDK 4.43 does not cancel an
+initialization that has not yet reached the adapter.
 
 ## IDs
 
@@ -86,7 +89,7 @@ signal-cli failures surface as `@chat-adapter/shared` errors (signal-cli JSON-RP
 | `ResourceNotFoundError` | The recipient is not registered with Signal (`-1`) |
 | `ValidationError` | Invalid request or parameters (`-32600`, other `-32602`, other `-1` user errors); from `initialize()`, a single-account daemon (started with `-a`) |
 | `NetworkError` | signal-cli unreachable, other HTTP failures, malformed replies, signal-cli I/O errors (`-3`), or a send where every recipient failed on the network (`-1` with `NETWORK_FAILURE` results) |
-| `AdapterError` with `code` | `UNTRUSTED_IDENTITY` (`-4`), `CAPTCHA_REJECTED` (`-6`), `METHOD_NOT_FOUND` (`-32601`), `SIGNAL_CLI_ERROR` (anything else, e.g. `-32603`) |
+| `AdapterError` with `code` | `UNTRUSTED_IDENTITY` (`-4`), `CAPTCHA_REJECTED` (`-6`), `METHOD_NOT_FOUND` (`-32601`), `SIGNAL_CLI_ERROR` (anything else, e.g. `-32603`); from `initialize()`, `STARTUP_CANCELLED` when `disconnect()` ran during startup |
 
 signal-cli 0.14.9 reports an I/O failure during `send` as an internal error (`-32603`, "Failed to send message: … (IOException)"),
 so it arrives as `AdapterError` with code `SIGNAL_CLI_ERROR`, not as `NetworkError`.

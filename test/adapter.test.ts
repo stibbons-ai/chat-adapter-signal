@@ -72,6 +72,12 @@ describe("configuration", () => {
     ).toThrow(expect.objectContaining({ name: "ValidationError", message: expect.stringContaining("drainTimeoutMs") }));
   });
 
+  it.each([0, 2 ** 31 - 1])("accepts drainTimeoutMs %s", (drainTimeoutMs) => {
+    expect(() =>
+      createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: "http://signal-cli:8080" }, drainTimeoutMs }),
+    ).not.toThrow();
+  });
+
   it("rejects an unsupported transport type by name", () => {
     const transport = { type: "socket", path: "/run/signal-cli.sock" } as unknown as SignalTransportConfig;
 
@@ -345,36 +351,34 @@ describe("event stream robustness", () => {
     );
   });
 
-  it("shutdown during startup leaves no event stream open", async () => {
-    const { fake, chat, logger } = await bot({ initialize: false });
-    const received: string[] = [];
-    chat.onDirectMessage((_thread, message) => {
-      received.push(message.text);
-    });
+  it("shutdown during startup rejects initialize, opens nothing, and a later initialize starts afresh", async () => {
+    const { fake, chat, nextDirectMessage } = await bot({ initialize: false });
 
-    const starting = chat.initialize().catch(() => {});
+    const starting = chat.initialize();
     await new Promise((resolve) => setImmediate(resolve));
     await chat.shutdown();
-    await starting;
-    // Real wait on purpose: a late stream would be opened by the startup still in flight.
+    await expect(starting).rejects.toMatchObject({ name: "AdapterError", code: "STARTUP_CANCELLED" });
+    // Real wait on purpose: a late request or stream would come from the startup still in flight.
     await new Promise((resolve) => setTimeout(resolve, 100));
 
+    expect(fake.requests.map((request) => request.path)).toEqual(["/api/v1/check"]);
     expect(fake.openEventStreams).toBe(0);
-    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "after shutdown" }));
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(received).toEqual([]);
-    expect(logger.entries.filter((entry) => entry.level === "error")).toEqual([]);
+
+    await chat.initialize();
+    expect(fake.openEventStreams).toBe(1);
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "after restart" }));
+    expect((await nextDirectMessage()).message.text).toBe("after restart");
   });
 
   it("shutdown while the event stream is connecting closes it once it opens", async () => {
     const { fake, chat } = await bot({ initialize: false });
     const release = fake.holdEventStreams();
 
-    const starting = chat.initialize().catch(() => {});
+    const starting = chat.initialize();
     await expect.poll(() => fake.requests.some((request) => request.path.startsWith("/api/v1/events"))).toBe(true);
     await chat.shutdown();
     release();
-    await starting;
+    await expect(starting).rejects.toMatchObject({ code: "STARTUP_CANCELLED" });
 
     await expect.poll(() => fake.openEventStreams).toBe(0);
   });
@@ -474,6 +478,25 @@ describe("event stream robustness", () => {
     const warnings = logger.entries.filter((entry) => entry.level === "warn");
     expect(warnings).toEqual([
       { level: "warn", message: "signal-cli could not receive a message", args: [{ type, sender: ALICE_ACI }] },
+    ]);
+    expect(JSON.stringify(logger.entries)).not.toContain("+4366012345");
+  });
+
+  it.each([
+    { case: "no sourceUuid", sourceUuid: undefined },
+    { case: "a phone number as sourceUuid", sourceUuid: "+4366012345" },
+  ])("warns about a receive failure with $case by type only", async ({ sourceUuid }) => {
+    const { fake, logger, nextDirectMessage } = await bot();
+    const { dataMessage: _lost, sourceUuid: _aci, ...rest } = directTextEnvelope({ aci: ALICE_ACI, number: "+4366012345", text: "lost" });
+    const envelope = sourceUuid === undefined ? rest : { ...rest, sourceUuid };
+    const exception = { message: "Untrusted identity: +4366012345", type: "UntrustedIdentityException" };
+    fake.injectRaw(`event:receive\ndata:${JSON.stringify({ account: BOT_ACCOUNT, envelope, exception })}\n\n`);
+    fake.injectEnvelope(directTextEnvelope({ aci: BOB_ACI, text: "next" }));
+    await nextDirectMessage();
+
+    const warnings = logger.entries.filter((entry) => entry.level === "warn");
+    expect(warnings).toEqual([
+      { level: "warn", message: "signal-cli could not receive a message", args: [{ type: "UntrustedIdentityException" }] },
     ]);
     expect(JSON.stringify(logger.entries)).not.toContain("+4366012345");
   });
