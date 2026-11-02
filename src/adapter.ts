@@ -18,7 +18,7 @@ import {
   type SignalRawMessage,
   type SignalSendResult,
 } from "./envelope.js";
-import { ADAPTER_NAME } from "./errors.js";
+import { ADAPTER_NAME, malformedResponse } from "./errors.js";
 import { SignalFormatConverter } from "./format.js";
 import { HttpTransport, type HttpTransportOptions } from "./transport/http.js";
 import { LineTransport, type LineTransportOptions } from "./transport/line.js";
@@ -317,7 +317,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       });
     }
     if (!Array.isArray(accounts) || accounts.some((entry) => typeof entry !== "object" || entry === null)) {
-      throw new NetworkError(ADAPTER_NAME, `signal-cli JSON-RPC ${method} returned a malformed response`);
+      throw malformedResponse(method);
     }
     const found = accounts.find((entry) => entry.number === this.account || (entry.aci ?? entry.uuid) === this.account);
     const self = found && { aci: found.aci ?? found.uuid, number: found.number ?? undefined };
@@ -340,7 +340,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   private handleEvent(event: ReceiveEvent): void {
     const { account, envelope, exception } = event;
     // A multi-account daemon pushes every account's events over a socket or TCP connection.
-    if (account !== undefined && account !== this.botNumber && account !== this._botUserId && account !== this.account) {
+    if (account !== undefined && account !== this.botNumber && account !== this._botUserId) {
       return;
     }
     if (exception) {
@@ -396,25 +396,8 @@ function createTransport(config: SignalTransportConfig, account: string): Signal
       }
       return new HttpTransport(config, account);
     case "spawn":
-      if (config.command !== undefined && (typeof config.command !== "string" || config.command === "")) {
-        throw new ValidationError(ADAPTER_NAME, 'transport.command must be a non-empty string for `{ type: "spawn" }`.');
-      }
-      if (config.args !== undefined && !(Array.isArray(config.args) && config.args.every((arg) => typeof arg === "string"))) {
-        throw new ValidationError(ADAPTER_NAME, 'transport.args must be an array of strings for `{ type: "spawn" }`.');
-      }
-      return new LineTransport(config, account);
     case "socket":
-      if (typeof config.path !== "string" || config.path === "") {
-        throw new ValidationError(ADAPTER_NAME, 'transport.path is required for `{ type: "socket" }`.');
-      }
-      return new LineTransport(config, account);
     case "tcp":
-      if (typeof config.host !== "string" || config.host === "") {
-        throw new ValidationError(ADAPTER_NAME, 'transport.host is required for `{ type: "tcp" }`.');
-      }
-      if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65_535) {
-        throw new ValidationError(ADAPTER_NAME, 'transport.port must be an integer from 1 to 65535 for `{ type: "tcp" }`.');
-      }
       return new LineTransport(config, account);
     default: {
       // Unreachable for typed callers; JavaScript callers can still pass any `type`.

@@ -1,14 +1,13 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AuthenticationError, NetworkError, ValidationError } from "@chat-adapter/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSignalAdapter, type SignalTransportConfig } from "../src/index.js";
-import { BOT_ACCOUNT, BOT_ACI, directTextEnvelope, FakeSignalCli } from "./fake-signal-cli.js";
-import { startBot, type Bot } from "./helpers.js";
+import { ALICE_ACI, BOT_ACCOUNT, BOT_ACI, directTextEnvelope, FakeSignalCli } from "./fake-signal-cli.js";
+import { fakeSignalCliOnPath as spawnable, startBot, type Bot } from "./helpers.js";
 
-const ALICE_ACI = "a1b2c3d4-0000-4000-8000-00000000a11c";
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -29,13 +28,6 @@ async function bot(fake: FakeSignalCli, transport: SignalTransportConfig, initia
   const started = await startBot({ fake, config: { account: BOT_ACCOUNT, transport }, initialize });
   cleanups.push(() => started.chat.shutdown());
   return started;
-}
-
-/** Puts the fake `signal-cli` on PATH, wired to the fake's TCP line server; signal-cli -a always runs single-account. */
-async function spawnable(fake: FakeSignalCli): Promise<void> {
-  fake.singleAccount = true;
-  vi.stubEnv("FAKE_SIGNAL_CLI_PORT", String(await fake.listenTcp()));
-  vi.stubEnv("PATH", `${join(FIXTURES, "bin")}${delimiter}${process.env.PATH}`);
 }
 
 async function socketPath(): Promise<string> {
@@ -282,6 +274,26 @@ describe("socket and TCP transports", () => {
     const { thread } = await nextDirectMessage();
 
     await expect(thread.post("reply")).rejects.toBeInstanceOf(AuthenticationError);
+  });
+
+  it("fails requests in flight and reports the error when the connection is reset", async () => {
+    const fake = await fakeWithLine();
+    const port = await fake.listenTcp();
+    const { logger, nextDirectMessage } = await bot(fake, { type: "tcp", host: "127.0.0.1", port });
+    fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "hi" }));
+    const { thread } = await nextDirectMessage();
+    const releaseSend = fake.hold("send");
+    const post = thread.post("reply");
+    await expect.poll(() => fake.rpcRequests("send").length).toBe(1);
+
+    fake.resetLineConnections();
+
+    const reset = expect.stringMatching(new RegExp(`^signal-cli closed the connection \\(tcp://127\\.0\\.0\\.1:${port}\\): .*ECONNRESET`));
+    await expect(post).rejects.toThrow(expect.objectContaining({ name: "NetworkError", message: reset }));
+    await expect.poll(() => logger.entries.find((entry) => entry.level === "error")?.args).toEqual([
+      { error: expect.objectContaining({ message: reset }) },
+    ]);
+    releaseSend();
   });
 
   it("reconnects for the next request after the daemon dropped the connection", async () => {

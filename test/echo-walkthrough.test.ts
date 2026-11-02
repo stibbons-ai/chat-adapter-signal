@@ -1,11 +1,11 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { createMemoryState } from "@chat-adapter/state-memory";
 import { Chat } from "chat";
 import { afterEach, expect, it, vi } from "vitest";
 import { createSignalAdapter, type SignalTransportConfig } from "../src/index.js";
+import { fakeSignalCliOnPath } from "./helpers.js";
 import { ALICE_ACI, BOB_ACI, BOT_ACCOUNT, BOT_ACI, directTextEnvelope, FakeSignalCli, groupTextEnvelope } from "./fake-signal-cli.js";
 
 
@@ -26,9 +26,7 @@ const transports: Record<SignalTransportConfig["type"], (signalCli: FakeSignalCl
   },
   tcp: async (signalCli) => ({ type: "tcp", host: "127.0.0.1", port: await signalCli.listenTcp() }),
   spawn: async (signalCli) => {
-    signalCli.singleAccount = true;
-    vi.stubEnv("FAKE_SIGNAL_CLI_PORT", String(await signalCli.listenTcp()));
-    vi.stubEnv("PATH", `${fileURLToPath(new URL("./fixtures/bin", import.meta.url))}${delimiter}${process.env.PATH}`);
+    await fakeSignalCliOnPath(signalCli);
     return { type: "spawn" };
   },
 };

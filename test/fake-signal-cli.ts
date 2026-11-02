@@ -110,6 +110,13 @@ export class FakeSignalCli {
     }
   }
 
+  /** Resets every line connection (TCP RST), so the client sees an error (ECONNRESET) before the close. */
+  resetLineConnections(): void {
+    for (const socket of this.lineConnections) {
+      socket.resetAndDestroy();
+    }
+  }
+
   /** Resolves once no line connection is open. */
   async lineConnectionsClosed(): Promise<void> {
     await Promise.all([...this.lineConnections].map((socket) => (socket.closed ? undefined : once(socket, "close"))));
@@ -129,6 +136,7 @@ export class FakeSignalCli {
     socket.on("error", () => {});
     const lines = createInterface({ input: socket, crlfDelay: Infinity });
     lines.on("line", (line) => void this.handleLine(socket, line));
+    lines.on("error", () => {});
   }
 
   private async handleLine(socket: Socket, line: string): Promise<void> {

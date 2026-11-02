@@ -1,5 +1,8 @@
 import { createMemoryState } from "@chat-adapter/state-memory";
+import { delimiter } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Chat, type Logger, type Message, type Thread } from "chat";
+import { vi } from "vitest";
 import { createSignalAdapter, type SignalAdapter, type SignalAdapterConfig } from "../src/index.js";
 import { BOT_ACCOUNT, FakeSignalCli } from "./fake-signal-cli.js";
 
@@ -74,4 +77,15 @@ export async function startBot(
       return received ? Promise.resolve(received) : new Promise((resolve) => waiting.push(resolve));
     },
   };
+}
+
+/**
+ * Puts the fake `signal-cli` executable first on PATH, wired to the fake's TCP line server.
+ * `signal-cli -a <account> jsonRpc` always runs single-account, so the fake does too.
+ * Undo with `vi.unstubAllEnvs()`.
+ */
+export async function fakeSignalCliOnPath(fake: FakeSignalCli): Promise<void> {
+  fake.singleAccount = true;
+  vi.stubEnv("FAKE_SIGNAL_CLI_PORT", String(await fake.listenTcp()));
+  vi.stubEnv("PATH", `${fileURLToPath(new URL("./fixtures/bin", import.meta.url))}${delimiter}${process.env.PATH}`);
 }

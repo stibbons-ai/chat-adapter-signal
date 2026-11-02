@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { NetworkError, ValidationError } from "@chat-adapter/shared";
 import type { ReceiveEvent } from "../envelope.js";
-import { ADAPTER_NAME, fromJsonRpcError, unreachable, type JsonRpcErrorObject } from "../errors.js";
+import { ADAPTER_NAME, fromJsonRpcError, malformedResponse, unreachable, type JsonRpcErrorObject } from "../errors.js";
 import type { EventListener, EventSubscription, SignalTransport } from "./types.js";
 
 export interface SpawnTransportOptions {
@@ -79,7 +79,9 @@ export class LineTransport implements SignalTransport {
   private readonly pending = new Map<number, Pending>();
   private nextRequestId = 1;
 
+  /** Validates `options` (they may come from untyped JavaScript) and prepares, but does not open, the connection. */
   constructor(options: LineTransportOptions, account: string) {
+    validate(options);
     switch (options.type) {
       case "spawn": {
         const command = options.command ?? "signal-cli";
@@ -135,6 +137,8 @@ export class LineTransport implements SignalTransport {
     const connecting = this.connection;
     this.connection = undefined;
     this.listener = undefined;
+    // Buffer again for the next subscribe(); until then a reopened connection's notifications stay dropped.
+    this.early = [];
     const connection = await connecting?.catch(() => undefined);
     await connection?.close();
   }
@@ -142,7 +146,6 @@ export class LineTransport implements SignalTransport {
   private connect(): Promise<Connection> {
     if (!this.connection) {
       const connecting = this.open().then((connection) => {
-        this.early = [];
         this.read(connection, connecting);
         return connection;
       });
@@ -160,6 +163,8 @@ export class LineTransport implements SignalTransport {
   private read(connection: Connection, current: Promise<Connection>): void {
     const lines = createInterface({ input: connection.input, crlfDelay: Infinity });
     lines.on("line", (line) => this.handleLine(line));
+    // readline re-emits input errors; the connection's own error handling reports them via `ended`.
+    lines.on("error", () => {});
     void connection.ended.then((reason) => {
       lines.close();
       if (this.connection === current) {
@@ -172,7 +177,6 @@ export class LineTransport implements SignalTransport {
       }
       const listener = this.listener;
       this.listener = undefined;
-      this.early = [];
       if (reason && listener) {
         listener.onError(reason);
         listener.onClosed();
@@ -224,7 +228,7 @@ export class LineTransport implements SignalTransport {
     } else if ("result" in message) {
       pending.resolve(message.result);
     } else {
-      pending.reject(new NetworkError(ADAPTER_NAME, `signal-cli JSON-RPC ${pending.method} returned a malformed response`));
+      pending.reject(malformedResponse(pending.method));
     }
   }
 
@@ -234,6 +238,36 @@ export class LineTransport implements SignalTransport {
     } catch (error) {
       this.listener?.onError(error);
     }
+  }
+}
+
+function validate(options: LineTransportOptions): void {
+  const fail = (message: string) => {
+    throw new ValidationError(ADAPTER_NAME, `${message} for \`{ type: "${options.type}" }\`.`);
+  };
+  const isNonEmptyString = (value: unknown) => typeof value === "string" && value !== "";
+  switch (options.type) {
+    case "spawn":
+      if (options.command !== undefined && !isNonEmptyString(options.command)) {
+        fail("transport.command must be a non-empty string");
+      }
+      if (options.args !== undefined && !(Array.isArray(options.args) && options.args.every((arg) => typeof arg === "string"))) {
+        fail("transport.args must be an array of strings");
+      }
+      break;
+    case "socket":
+      if (!isNonEmptyString(options.path)) {
+        fail("transport.path is required");
+      }
+      break;
+    case "tcp":
+      if (!isNonEmptyString(options.host)) {
+        fail("transport.host is required");
+      }
+      if (!Number.isInteger(options.port) || options.port < 1 || options.port > 65_535) {
+        fail("transport.port must be an integer from 1 to 65535");
+      }
+      break;
   }
 }
 
@@ -249,7 +283,8 @@ async function connectSocket(socket: Socket, endpoint: string): Promise<Connecti
   socket.on("error", (error) => {
     failure = error;
   });
-  const ended = once(socket, "close").then(() =>
+  // Not `once(socket, "close")`: that rejects when "error" comes first, which is exactly the case to report.
+  const ended = new Promise((resolve) => socket.once("close", resolve)).then(() =>
     closing
       ? undefined
       : new NetworkError(
@@ -285,7 +320,9 @@ async function spawnSignalCli(command: string, args: string[]): Promise<Connecti
   // Writing to a process that just exited raises EPIPE on stdin; the exit itself is reported below.
   child.stdin.on("error", () => {});
   let closing = false;
-  const ended = once(child, "close").then(([code, signal]) => {
+  const ended = new Promise<[number | null, NodeJS.Signals | null]>((resolve) =>
+    child.once("close", (code, signal) => resolve([code, signal])),
+  ).then(([code, signal]) => {
     if (closing) {
       return undefined;
     }

@@ -103,6 +103,10 @@ function causeMessage(error: unknown): string {
   return error.cause instanceof Error ? error.cause.message : error.message;
 }
 
+export function malformedResponse(method: string): NetworkError {
+  return new NetworkError(ADAPTER_NAME, `signal-cli JSON-RPC ${method} returned a malformed response`);
+}
+
 export function unreachable(what: string, cause: unknown): NetworkError {
   return new NetworkError(
     ADAPTER_NAME,
