@@ -46,6 +46,8 @@ export interface SignalAdapterConfig {
   userName?: string;
   /** Defaults to the Chat instance's logger. */
   logger?: Logger;
+  /** How long `disconnect()` waits for running message handlers to finish. Default: 10 000 ms. */
+  drainTimeoutMs?: number;
 }
 
 interface SignalAccount {
@@ -62,6 +64,9 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   private readonly explicitUserName: string | undefined;
   private logger: Logger | undefined;
   private chat: ChatInstance | undefined;
+  private readonly drainTimeoutMs: number;
+  /** Message handlers still running; `disconnect()` waits for them, bounded by `drainTimeoutMs`. */
+  private readonly inFlight = new Set<Promise<void>>();
   private subscription: EventSubscription | undefined;
   private _userName: string;
   private _botUserId: string | undefined;
@@ -80,8 +85,10 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       );
     }
 
-    this.account = account;
-    this.transport = createTransport(transport, account);
+    // signal-cli normalises an ACI on JSON-RPC but not in the events query, so send its canonical form everywhere.
+    this.account = normalizeAci(account) ?? account;
+    this.transport = createTransport(transport, this.account);
+    this.drainTimeoutMs = config.drainTimeoutMs ?? 10_000;
     this.explicitUserName = config.userName;
     this._userName = config.userName ?? "bot";
     this.logger = config.logger;
@@ -111,10 +118,29 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     });
   }
 
+  /**
+   * Closes the event stream, then waits for running handlers so their replies
+   * and lock releases complete before Chat disconnects its state. The wait is
+   * bounded: a handler that never settles (or that itself calls
+   * `chat.shutdown()`) cannot hold shutdown forever.
+   */
   async disconnect(): Promise<void> {
     const subscription = this.subscription;
     this.subscription = undefined;
     await subscription?.close();
+    if (this.inFlight.size === 0) {
+      return;
+    }
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(true), this.drainTimeoutMs);
+    });
+    const pending = this.inFlight.size;
+    const timedOut = await Promise.race([Promise.allSettled(this.inFlight).then(() => false), expired]);
+    clearTimeout(timer);
+    if (timedOut) {
+      this.logger?.warn(`Stopped waiting for ${pending} Signal message handler(s) after ${this.drainTimeoutMs} ms`);
+    }
   }
 
   async handleWebhook(): Promise<Response> {
@@ -195,8 +221,14 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   private async checkVersion(): Promise<void> {
-    const version = String((await this.transport.request<{ version?: unknown } | null>("version"))?.version);
-    if (!isAtLeast(version, MIN_SIGNAL_CLI_VERSION)) {
+    const version = (await this.transport.request<{ version?: unknown } | null>("version"))?.version;
+    const actual = typeof version === "string" ? parseVersion(version) : undefined;
+    if (!actual) {
+      this.logger?.warn(
+        `signal-cli reported an unrecognised version; cannot check it against ${MIN_SIGNAL_CLI_VERSION}, the oldest version this adapter is tested with`,
+        { version },
+      );
+    } else if (compareVersions(actual, MIN_VERSION_PARTS) < 0) {
       this.logger?.warn(
         `signal-cli ${version} is older than ${MIN_SIGNAL_CLI_VERSION}, the oldest version this adapter is tested with; update signal-cli`,
         { version, minimum: MIN_SIGNAL_CLI_VERSION },
@@ -223,12 +255,10 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       }
       throw error;
     }
-    if (!Array.isArray(accounts)) {
+    if (!Array.isArray(accounts) || accounts.some((entry) => typeof entry !== "object" || entry === null)) {
       throw new NetworkError(ADAPTER_NAME, "signal-cli JSON-RPC listAccounts returned a malformed response");
     }
-    // signal-cli accepts an ACI in any case, with or without dashes.
-    const accountAci = normalizeAci(this.account);
-    const self = accounts.find((entry) => entry.number === this.account || (accountAci && entry.aci === accountAci));
+    const self = accounts.find((entry) => entry.number === this.account || entry.aci === this.account);
     if (!isAci(self?.aci)) {
       throw new AuthenticationError(
         ADAPTER_NAME,
@@ -246,12 +276,15 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   private handleEvent(event: ReceiveEvent): void {
-    const { envelope } = event;
-    if (!envelope) {
-      this.logger?.warn("signal-cli reported a receive error", { exception: event.exception });
+    const { envelope, exception } = event;
+    if (exception) {
+      // signal-cli could not decrypt or verify an incoming message, which is then lost. Only the
+      // exception type is logged: its message can contain the sender's phone number.
+      const type = typeof exception === "object" && "type" in exception ? exception.type : undefined;
+      this.logger?.warn("signal-cli could not receive a message", { type: typeof type === "string" ? type : "unknown" });
       return;
     }
-    const message = parseDirectTextMessage(envelope, this.formatConverter, this._botUserId);
+    const message = envelope && parseDirectTextMessage(envelope, this.formatConverter, this._botUserId);
     if (!(message && this.chat)) {
       this.logger?.debug("Ignoring Signal envelope outside the supported message types");
       return;
@@ -259,24 +292,26 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     // Not awaited: one slow handler must not hold up other Conversations, and
     // Chat's concurrency strategies need to see overlapping messages. Chat
     // logs handler failures itself; the catch only prevents an unhandled rejection.
-    this.chat.processMessage(this, message.threadId, message).catch(() => {});
+    const task = this.chat.processMessage(this, message.threadId, message).catch(() => {});
+    this.inFlight.add(task);
+    void task.then(() => this.inFlight.delete(task));
   }
 }
 
-function isAtLeast(version: string, minimum: string): boolean {
-  const parse = (value: string) => /^(\d+)\.(\d+)\.(\d+)/.exec(value)?.slice(1).map(Number);
-  const actual = parse(version);
-  const required = parse(minimum);
-  if (!(actual && required)) {
-    return false;
-  }
-  for (let index = 0; index < 3; index++) {
+const MIN_VERSION_PARTS = MIN_SIGNAL_CLI_VERSION.split(".").map(Number);
+
+function parseVersion(version: string): readonly number[] | undefined {
+  return /^(\d+)\.(\d+)\.(\d+)/.exec(version)?.slice(1).map(Number);
+}
+
+function compareVersions(actual: readonly number[], required: readonly number[]): number {
+  for (let index = 0; index < required.length; index++) {
     const difference = (actual[index] ?? 0) - (required[index] ?? 0);
     if (difference !== 0) {
-      return difference > 0;
+      return difference;
     }
   }
-  return true;
+  return 0;
 }
 
 export function createSignalAdapter(config?: SignalAdapterConfig): SignalAdapter {

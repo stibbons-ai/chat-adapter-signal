@@ -26,6 +26,7 @@ it("echo bot: a user's 1:1 message is echoed back to that user", async () => {
       signal: createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: signalCli.url } }),
     },
     state: createMemoryState(),
+    concurrency: "queue",
     logger: "silent",
   });
   const replies: string[] = [];

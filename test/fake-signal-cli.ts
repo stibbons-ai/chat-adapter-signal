@@ -161,6 +161,13 @@ export class FakeSignalCli {
     }
 
     if (url.pathname === "/api/v1/events" && request.method === "GET") {
+      // Like signal-cli 0.14.9 (HttpServerHandler.getManagerFromQuery): the account must match a
+      // number or the lowercase dashed ACI exactly; this path does not normalise.
+      const account = url.searchParams.get("account");
+      if (account && !this.accounts.some((entry) => entry.number === account || entry.aci === account)) {
+        response.writeHead(400).end();
+        return;
+      }
       response.writeHead(200, { "Content-Type": "text/event-stream" });
       response.flushHeaders();
       this.eventStreams.add(response);

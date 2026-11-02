@@ -113,7 +113,7 @@ export class HttpTransport implements SignalTransport {
             );
             continue;
           }
-          if (typeof parsed !== "object" || parsed === null) {
+          if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
             listener.onError(new ValidationError(ADAPTER_NAME, "Ignoring signal-cli event that is not a JSON object"));
             continue;
           }

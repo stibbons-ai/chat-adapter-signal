@@ -31,6 +31,8 @@ const chat = new Chat({
     }),
   },
   state: createMemoryState(),
+  // Signal users often send several messages in a row; queue them instead of dropping them.
+  concurrency: "queue",
 });
 
 chat.onDirectMessage(async (thread, message) => {
@@ -46,10 +48,21 @@ await chat.initialize();
 | `transport` | `SIGNAL_CLI_URL` (implies `{ type: "http" }`) | `{ type: "http", url, headers? }`. `headers` are sent on every request, including the event stream, e.g. for a reverse proxy's auth. |
 | `userName` | – | Defaults to the `Chat` instance's `userName`. |
 | `logger` | – | Defaults to the `Chat` instance's logger. |
+| `drainTimeoutMs` | – | How long `disconnect()` waits for running handlers. Default 10 000. |
 
 `initialize()` checks that signal-cli is reachable, reads its version, looks up the
 Bot Account's ACI with `listAccounts`, and opens the event stream. The Host App must
 stay running to receive messages; webhooks are not supported (`handleWebhook` answers 501).
+
+Each incoming message is handed to Chat without waiting for the previous one, so a slow
+handler in one Conversation does not hold up the others. Within one Conversation, Chat's
+`concurrency` setting decides what happens when a message arrives while its handler is
+still running. With Chat's default `"drop"`, that second message is dropped (Chat logs a
+`LockError`); use `"queue"` (or `"debounce"`) for Signal bots, as in the example above.
+
+`disconnect()` (called by `chat.shutdown()`) first closes the event stream, then waits for
+running handlers to finish so their replies go out and their locks are released, at most
+`drainTimeoutMs`; after that it logs a warning and returns.
 
 ## IDs
 
