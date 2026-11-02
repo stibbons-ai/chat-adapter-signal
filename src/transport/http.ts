@@ -140,6 +140,9 @@ export class HttpTransport implements SignalTransport {
     };
   }
 
+  /** Nothing to release: every request is its own HTTP exchange, and `subscribe()` returns its own `close()`. */
+  async close(): Promise<void> {}
+
   private async fetchPath(path: string, init: RequestInit, what: string): Promise<Response> {
     try {
       return await fetch(this.endpoint + path, {

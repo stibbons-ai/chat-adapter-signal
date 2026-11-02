@@ -21,6 +21,7 @@ import {
 import { ADAPTER_NAME } from "./errors.js";
 import { SignalFormatConverter } from "./format.js";
 import { HttpTransport, type HttpTransportOptions } from "./transport/http.js";
+import { LineTransport, type LineTransportOptions } from "./transport/line.js";
 import type { EventSubscription, SignalTransport } from "./transport/types.js";
 import {
   decodeThreadId,
@@ -37,8 +38,8 @@ export const MIN_SIGNAL_CLI_VERSION = "0.14.9";
 /** Largest delay Node's `setTimeout` honours (2^31 - 1 ms). */
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
-/** How the adapter reaches signal-cli, by `type`. Only the HTTP daemon is supported so far. */
-export type SignalTransportConfig = HttpTransportOptions;
+/** How the adapter reaches signal-cli, by `type`: HTTP daemon, spawned process, Unix socket, or TCP. */
+export type SignalTransportConfig = HttpTransportOptions | LineTransportOptions;
 
 export interface SignalAdapterConfig {
   /** The Bot Account's phone number (or ACI) as registered in signal-cli. Falls back to `SIGNAL_ACCOUNT`. */
@@ -53,9 +54,11 @@ export interface SignalAdapterConfig {
   drainTimeoutMs?: number;
 }
 
+/** An entry of `listAccounts`; `listContacts` entries carry the ACI as `uuid` instead. */
 interface SignalAccount {
   number?: string | null;
   aci?: string | null;
+  uuid?: string | null;
 }
 
 export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> {
@@ -72,9 +75,13 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   private readonly inFlight = new Set<Promise<void>>();
   /** Bumped by every `initialize()` and `disconnect()`, so a startup can tell it was cancelled. */
   private generation = 0;
+  /** The generation of the latest `initialize()`; `disconnect()` does not bump it. */
+  private latestStartup = 0;
   private subscription: EventSubscription | undefined;
   private _userName: string;
   private _botUserId: string | undefined;
+  /** The Bot Account's phone number, if it has one; signal-cli labels its events with it. */
+  private botNumber: string | undefined;
 
   constructor(config: SignalAdapterConfig = {}) {
     const account = config.account ?? process.env.SIGNAL_ACCOUNT;
@@ -118,6 +125,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     // instead of opening an event stream that nothing would close. Rejecting (not returning)
     // keeps Chat from marking itself initialized, so a later `chat.initialize()` starts afresh.
     const generation = ++this.generation;
+    this.latestStartup = generation;
     const throwIfCancelled = () => {
       if (generation !== this.generation) {
         throw new AdapterError("Signal adapter startup was cancelled by disconnect()", ADAPTER_NAME, "STARTUP_CANCELLED");
@@ -127,22 +135,33 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     this.logger ??= chat.getLogger(ADAPTER_NAME);
     this._userName = this.explicitUserName ?? chat.getUserName();
 
-    await this.transport.checkReachable();
-    throwIfCancelled();
-    await this.checkVersion();
-    throwIfCancelled();
-    this._botUserId = await this.resolveBotAci();
-    throwIfCancelled();
-    const subscription = await this.transport.subscribe({
-      onEvent: (event) => this.handleEvent(event),
-      onError: (error) => this.logger?.error("signal-cli event stream error", { error }),
-      onClosed: () => this.logger?.warn("signal-cli event stream closed; no further messages will be received"),
-    });
-    if (generation !== this.generation) {
-      await subscription.close();
+    try {
+      await this.transport.checkReachable();
       throwIfCancelled();
+      await this.checkVersion();
+      throwIfCancelled();
+      const self = await this.resolveBotAccount();
+      this._botUserId = self.aci;
+      this.botNumber = self.number;
+      throwIfCancelled();
+      const subscription = await this.transport.subscribe({
+        onEvent: (event) => this.handleEvent(event),
+        onError: (error) => this.logger?.error("signal-cli event stream error", { error }),
+        onClosed: () => this.logger?.warn("signal-cli event stream closed; no further messages will be received"),
+      });
+      if (generation !== this.generation) {
+        await subscription.close();
+        throwIfCancelled();
+      }
+      this.subscription = subscription;
+    } catch (error) {
+      // A failed or cancelled startup must not leave a socket open or a spawned signal-cli running,
+      // unless a newer initialize() owns the transport by now.
+      if (generation === this.latestStartup) {
+        await this.transport.close();
+      }
+      throw error;
     }
-    this.subscription = subscription;
   }
 
   /**
@@ -158,6 +177,13 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     const subscription = this.subscription;
     this.subscription = undefined;
     await subscription?.close();
+    await this.drain();
+    // After the drain: running handlers reply through the transport. ponytail: a handler that
+    // outlives drainTimeoutMs and sends afterwards reopens the transport; nothing closes that one.
+    await this.transport.close();
+  }
+
+  private async drain(): Promise<void> {
     if (this.inFlight.size === 0) {
       return;
     }
@@ -268,35 +294,40 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   /**
-   * The Bot Account's own ACI comes from `listAccounts`, the only RPC that
-   * returns it without asking the Signal server. signal-cli serves it only on
-   * a multi-account daemon (`signal-cli daemon` without `-a`); a
-   * single-account daemon answers METHOD_NOT_FOUND.
+   * The Bot Account's own ACI and number, read from signal-cli's local store
+   * without asking the Signal server. A multi-account daemon serves
+   * `listAccounts`; a single-account one (`-a`, always so for the spawn
+   * transport) answers METHOD_NOT_FOUND, and then the account's own entry in
+   * `listContacts` has them (signal-cli 0.14.9 refreshes that one profile and
+   * ignores a failed refresh).
    */
-  private async resolveBotAci(): Promise<string> {
+  private async resolveBotAccount(): Promise<{ aci: string; number: string | undefined }> {
+    let method = "listAccounts";
     let accounts: SignalAccount[] | null;
     try {
-      accounts = await this.transport.request<SignalAccount[] | null>("listAccounts");
+      accounts = await this.transport.request<SignalAccount[] | null>(method);
     } catch (error) {
-      if (error instanceof AdapterError && error.code === "METHOD_NOT_FOUND") {
-        throw new ValidationError(
-          ADAPTER_NAME,
-          `signal-cli at ${this.transport.endpoint} runs in single-account mode; start the daemon without -a/--account`,
-        );
+      if (!(error instanceof AdapterError && error.code === "METHOD_NOT_FOUND")) {
+        throw error;
       }
-      throw error;
+      method = "listContacts";
+      accounts = await this.transport.request<SignalAccount[] | null>(method, {
+        recipient: [this.account],
+        allRecipients: true,
+      });
     }
     if (!Array.isArray(accounts) || accounts.some((entry) => typeof entry !== "object" || entry === null)) {
-      throw new NetworkError(ADAPTER_NAME, "signal-cli JSON-RPC listAccounts returned a malformed response");
+      throw new NetworkError(ADAPTER_NAME, `signal-cli JSON-RPC ${method} returned a malformed response`);
     }
-    const self = accounts.find((entry) => entry.number === this.account || entry.aci === this.account);
+    const found = accounts.find((entry) => entry.number === this.account || (entry.aci ?? entry.uuid) === this.account);
+    const self = found && { aci: found.aci ?? found.uuid, number: found.number ?? undefined };
     if (!isAci(self?.aci)) {
       throw new AuthenticationError(
         ADAPTER_NAME,
         `Bot Account ${this.account} is not registered or linked on the signal-cli daemon at ${this.transport.endpoint}`,
       );
     }
-    return self.aci;
+    return { aci: self.aci, number: self.number };
   }
 
   private requireBotAci(): string {
@@ -307,7 +338,11 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   private handleEvent(event: ReceiveEvent): void {
-    const { envelope, exception } = event;
+    const { account, envelope, exception } = event;
+    // A multi-account daemon pushes every account's events over a socket or TCP connection.
+    if (account !== undefined && account !== this.botNumber && account !== this._botUserId && account !== this.account) {
+      return;
+    }
     if (exception) {
       // signal-cli could not decrypt or verify an incoming message, which is then lost. Only the
       // exception type and the sender's ACI are logged: the message can contain a phone number.
@@ -360,10 +395,31 @@ function createTransport(config: SignalTransportConfig, account: string): Signal
         throw new ValidationError(ADAPTER_NAME, 'transport.url is required for `{ type: "http" }`.');
       }
       return new HttpTransport(config, account);
+    case "spawn":
+      if (config.command !== undefined && (typeof config.command !== "string" || config.command === "")) {
+        throw new ValidationError(ADAPTER_NAME, 'transport.command must be a non-empty string for `{ type: "spawn" }`.');
+      }
+      if (config.args !== undefined && !(Array.isArray(config.args) && config.args.every((arg) => typeof arg === "string"))) {
+        throw new ValidationError(ADAPTER_NAME, 'transport.args must be an array of strings for `{ type: "spawn" }`.');
+      }
+      return new LineTransport(config, account);
+    case "socket":
+      if (typeof config.path !== "string" || config.path === "") {
+        throw new ValidationError(ADAPTER_NAME, 'transport.path is required for `{ type: "socket" }`.');
+      }
+      return new LineTransport(config, account);
+    case "tcp":
+      if (typeof config.host !== "string" || config.host === "") {
+        throw new ValidationError(ADAPTER_NAME, 'transport.host is required for `{ type: "tcp" }`.');
+      }
+      if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65_535) {
+        throw new ValidationError(ADAPTER_NAME, 'transport.port must be an integer from 1 to 65535 for `{ type: "tcp" }`.');
+      }
+      return new LineTransport(config, account);
     default: {
       // Unreachable for typed callers; JavaScript callers can still pass any `type`.
-      const unsupported: never = config.type;
-      throw new ValidationError(ADAPTER_NAME, `Unsupported transport type ${JSON.stringify(unsupported)}`);
+      const unsupported: never = config;
+      throw new ValidationError(ADAPTER_NAME, `Unsupported transport type ${JSON.stringify((unsupported as { type?: unknown }).type)}`);
     }
   }
 }
