@@ -6,8 +6,9 @@ export interface ServerSentEvent {
 /**
  * Parses a `text/event-stream` body per the WHATWG SSE spec: fields `event`
  * and `data` (multi-line joined by "\n"), comments ignored, an empty line
- * dispatches. Node 20 has no global EventSource, and custom headers must
- * reach the request, so the stream is read from `fetch` directly.
+ * dispatches. Node 24 has no global EventSource without an experimental
+ * flag, and custom headers must reach the request, so the stream is read
+ * from `fetch` directly.
  */
 export async function* parseEventStream(body: ReadableStream<Uint8Array>): AsyncGenerator<ServerSentEvent> {
   // Per stream, not module-level: the generator suspends at `yield` while another stream may run.

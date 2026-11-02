@@ -16,7 +16,7 @@
     "adapter"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "exports": {
     ".": {
@@ -45,9 +45,9 @@
   },
   "devDependencies": {
     "@chat-adapter/state-memory": "^4.43.0",
-    "@types/node": "^20.19.43",
+    "@types/node": "^24.19.2",
     "chat": "^4.43.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.12"
+    "vitest": "^5.0.5"
   }
 }

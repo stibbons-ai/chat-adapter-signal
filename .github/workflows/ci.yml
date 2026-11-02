@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ["20", "lts/*"]
+        node: ["24", "lts/*"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

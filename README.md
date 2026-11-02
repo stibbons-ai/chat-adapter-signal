@@ -9,7 +9,7 @@ yourself; this package never bundles, downloads or installs signal-cli or libsig
 
 ## Requirements
 
-- Node.js 20 or newer, ESM only.
+- Node.js 24 or newer, ESM only.
 - `chat` ^4.43 (peer dependency).
 - signal-cli 0.14.9 or newer, running as a multi-account HTTP daemon
   (`signal-cli daemon --http <host:port>`, without `-a`), with the Bot Account
