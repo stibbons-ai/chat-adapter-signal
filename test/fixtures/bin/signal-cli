@@ -1,0 +1,3 @@
+#!/bin/sh
+# Stands in for a user-installed signal-cli on PATH; see ../fake-signal-cli.mjs.
+exec node "$(dirname "$0")/../fake-signal-cli.mjs" "$@"

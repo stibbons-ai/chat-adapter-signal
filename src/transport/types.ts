@@ -15,8 +15,8 @@ export interface EventSubscription {
 }
 
 /**
- * Talks to one signal-cli instance on behalf of one Bot Account. Later slices
- * add line-delimited JSON-RPC transports (spawn, socket, tcp) behind this interface.
+ * Talks to one signal-cli instance on behalf of one Bot Account: over HTTP
+ * (`http.ts`) or line-delimited JSON-RPC over stdio, a Unix socket or TCP (`line.ts`).
  */
 export interface SignalTransport {
   /** Where signal-cli is reached, for error messages. */
@@ -27,4 +27,9 @@ export interface SignalTransport {
   request<T>(method: string, params?: Record<string, unknown>): Promise<T>;
   /** Opens the event stream and resolves once it is connected. */
   subscribe(listener: EventListener): Promise<EventSubscription>;
+  /**
+   * Releases whatever the transport holds open (a socket, a spawned signal-cli)
+   * and resolves once it is gone. Later calls to the other methods reconnect.
+   */
+  close(): Promise<void>;
 }

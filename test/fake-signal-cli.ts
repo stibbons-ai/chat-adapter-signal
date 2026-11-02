@@ -1,6 +1,7 @@
 import { once } from "node:events";
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer as createNetServer, type AddressInfo, type Server as NetServer, type Socket } from "node:net";
+import { createInterface } from "node:readline";
 import { json } from "node:stream/consumers";
 
 export const BOT_ACCOUNT = "+15550000001";
@@ -9,6 +10,7 @@ export const ALICE_ACI = "a1b2c3d4-0000-4000-8000-00000000a11c";
 export const BOB_ACI = "b0b0b0b0-0000-4000-8000-000000000b0b";
 
 export interface RecordedRequest {
+  /** HTTP path and query, or `line` for a request over a line-delimited JSON-RPC connection. */
   path: string;
   method: string;
   headers: IncomingHttpHeaders;
@@ -25,10 +27,13 @@ export interface JsonRpcError {
 type RpcHandler = (params: Record<string, unknown> | undefined) => unknown;
 
 /**
- * A fake signal-cli HTTP daemon (`signal-cli daemon --http`) speaking the
- * 0.14.9 wire protocol: JSON-RPC on `POST /api/v1/rpc`, SSE receive events on
- * `GET /api/v1/events`, health on `GET /api/v1/check`. Records every request
- * and lets tests inject envelopes and JSON-RPC errors.
+ * A fake signal-cli daemon speaking the 0.14.9 wire protocol. HTTP
+ * (`daemon --http`): JSON-RPC on `POST /api/v1/rpc`, SSE receive events on
+ * `GET /api/v1/events`, health on `GET /api/v1/check`. Line-delimited JSON-RPC
+ * (`daemon --socket` / `--tcp`, and `jsonRpc` over stdio through the fake
+ * executable): one JSON object per line, `receive` notifications pushed as
+ * soon as a connection opens. Records every request and lets tests inject
+ * envelopes, JSON-RPC errors and disconnects.
  */
 export class FakeSignalCli {
   readonly requests: RecordedRequest[] = [];
@@ -38,6 +43,13 @@ export class FakeSignalCli {
   httpStatus = 200;
   /** Response headers sent with a non-200 `httpStatus`, e.g. `Retry-After`. */
   httpHeaders: Record<string, string> = {};
+  /**
+   * Act like a daemon started with `-a` (and like `signal-cli -a <account> jsonRpc`): `listAccounts`
+   * is not implemented, and `listContacts` finds the account itself.
+   */
+  singleAccount = false;
+  /** The fake executable's runs, one per spawn: its arguments and process ID. */
+  readonly spawns: Array<{ argv: string[]; pid: number }> = [];
 
   private readonly server: Server;
   private readonly eventStreams = new Set<ServerResponse>();
@@ -45,6 +57,9 @@ export class FakeSignalCli {
   private readonly rpcErrors = new Map<string, JsonRpcError>();
   private readonly rawRpcReplies = new Map<string, unknown>();
   private readonly holds = new Map<string, Promise<void>>();
+  private readonly nextHolds = new Map<string, Promise<void>>();
+  private readonly lineServers: NetServer[] = [];
+  private readonly lineConnections = new Set<Socket>();
   private readonly eventIdPrefix = `${Date.now()}-`;
   private nextEventSequence = 1;
   private nextSendTimestamp = 1_700_000_000_000;
@@ -52,7 +67,14 @@ export class FakeSignalCli {
   private constructor() {
     this.server = createServer((request, response) => void this.handle(request, response));
     this.rpcHandlers.set("version", () => ({ version: this.version }));
-    this.rpcHandlers.set("listAccounts", () => this.accounts);
+    this.rpcHandlers.set("listAccounts", () => (this.singleAccount ? undefined : this.accounts));
+    // signal-cli 0.14.9 ListContactsCommand JSON output: the ACI is `uuid`.
+    this.rpcHandlers.set("listContacts", (params) => {
+      const wanted = (params?.recipient as string[] | undefined) ?? [];
+      return this.accounts
+        .filter((entry) => wanted.includes(entry.number ?? "") || wanted.includes(entry.aci ?? ""))
+        .map((entry) => ({ number: entry.number, uuid: entry.aci, username: null, name: "" }));
+    });
     this.rpcHandlers.set("send", () => ({
       timestamp: this.nextSendTimestamp++,
       results: [{ type: "SUCCESS" }],
@@ -64,6 +86,75 @@ export class FakeSignalCli {
     fake.server.listen(0, "127.0.0.1");
     await once(fake.server, "listening");
     return fake;
+  }
+
+  /** Serves line-delimited JSON-RPC on a Unix socket (`daemon --socket <path>`). */
+  async listenSocket(path: string): Promise<void> {
+    await this.listenLine(path);
+  }
+
+  /** Serves line-delimited JSON-RPC on TCP (`daemon --tcp`); resolves with the port. */
+  async listenTcp(): Promise<number> {
+    const server = await this.listenLine(0, "127.0.0.1");
+    return (server.address() as AddressInfo).port;
+  }
+
+  /** Number of open line-delimited JSON-RPC connections (socket, TCP, or a running fake executable). */
+  get openLineConnections(): number {
+    return this.lineConnections.size;
+  }
+
+  /** Drops every line connection from the server side; the fake executable then exits with code 3. */
+  dropLineConnections(): void {
+    for (const socket of this.lineConnections) {
+      socket.destroy();
+    }
+  }
+
+  /** Resets every line connection (TCP RST), so the client sees an error (ECONNRESET) before the close. */
+  resetLineConnections(): void {
+    for (const socket of this.lineConnections) {
+      socket.resetAndDestroy();
+    }
+  }
+
+  /** Resolves once no line connection is open. */
+  async lineConnectionsClosed(): Promise<void> {
+    await Promise.all([...this.lineConnections].map((socket) => (socket.closed ? undefined : once(socket, "close"))));
+  }
+
+  private async listenLine(...address: [string] | [number, string]): Promise<NetServer> {
+    const server = createNetServer((socket) => this.serveLine(socket));
+    server.listen(...(address as [number, string]));
+    await once(server, "listening");
+    this.lineServers.push(server);
+    return server;
+  }
+
+  private serveLine(socket: Socket): void {
+    this.lineConnections.add(socket);
+    socket.on("close", () => this.lineConnections.delete(socket));
+    socket.on("error", () => {});
+    const lines = createInterface({ input: socket, crlfDelay: Infinity });
+    lines.on("line", (line) => void this.handleLine(socket, line));
+    lines.on("error", () => {});
+  }
+
+  private async handleLine(socket: Socket, line: string): Promise<void> {
+    const message = JSON.parse(line) as { fakeArgv?: string[]; pid?: number } & NonNullable<RecordedRequest["body"]>;
+    // The fake executable announces its command line first; that line is not JSON-RPC.
+    if (message.fakeArgv) {
+      this.spawns.push({ argv: message.fakeArgv, pid: message.pid ?? 0 });
+      return;
+    }
+    this.requests.push({ path: "line", method: "LINE", headers: {}, body: message });
+    const next = this.nextHolds.get(message.method);
+    this.nextHolds.delete(message.method);
+    await next;
+    await this.holds.get(message.method);
+    if (!socket.destroyed) {
+      socket.write(`${JSON.stringify(this.rpcReply(message))}\n`);
+    }
   }
 
   get url(): string {
@@ -108,16 +199,43 @@ export class FakeSignalCli {
     return release;
   }
 
+  /** Like signal-cli's `Manager.getSelfIdentifier()`: the number, or the ACI for an account without one. */
+  private get selfIdentifier(): string {
+    const self = this.accounts[0];
+    return self?.number ?? self?.aci ?? BOT_ACCOUNT;
+  }
+
+  /** Like `hold`, but only for the next line-delimited JSON-RPC call of `method`; later calls are answered at once. */
+  holdNext(method: string): () => void {
+    let release!: () => void;
+    this.nextHolds.set(
+      method,
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    return release;
+  }
+
   private receiveEvent(envelope: unknown): string {
-    const data = JSON.stringify({ account: BOT_ACCOUNT, envelope });
+    const data = JSON.stringify({ account: this.selfIdentifier, envelope });
     return `id:${this.eventIdPrefix}${this.nextEventSequence++}\nevent:receive\ndata:${data}\n\n`;
   }
 
-  /** Sends a receive event for the Bot Account to every open event stream. */
-  injectEnvelope(envelope: unknown): void {
+  /** Sends a receive event for the Bot Account (or the given `account`) to every open event stream and line connection. */
+  injectEnvelope(envelope: unknown, account = this.selfIdentifier): void {
     const event = this.receiveEvent(envelope);
     for (const stream of this.eventStreams) {
       stream.write(event);
+    }
+    this.injectLine({ jsonrpc: "2.0", method: "receive", params: { account, envelope } });
+  }
+
+  /** Writes one JSON value (or a raw string) as a line to every line connection. */
+  injectLine(message: unknown): void {
+    const line = typeof message === "string" ? message : JSON.stringify(message);
+    for (const socket of this.lineConnections) {
+      socket.write(`${line}\n`);
     }
   }
 
@@ -152,6 +270,11 @@ export class FakeSignalCli {
   }
 
   async stop(): Promise<void> {
+    for (const server of this.lineServers.splice(0)) {
+      this.dropLineConnections();
+      server.close();
+      await once(server, "close");
+    }
     if (!this.server.listening) {
       return;
     }
@@ -203,27 +326,26 @@ export class FakeSignalCli {
       const body = (await json(request)) as NonNullable<RecordedRequest["body"]>;
       recorded.body = body;
       await this.holds.get(body.method);
-      this.respondRpc(body, response);
+      response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(this.rpcReply(body)));
       return;
     }
 
     response.writeHead(404).end();
   }
 
-  private respondRpc(body: NonNullable<RecordedRequest["body"]>, response: ServerResponse): void {
-    const handler = this.rpcHandlers.get(body.method);
-    const error = this.rpcErrors.get(body.method);
-    let reply: unknown;
+  private rpcReply(body: NonNullable<RecordedRequest["body"]>): unknown {
     if (this.rawRpcReplies.has(body.method)) {
-      reply = this.rawRpcReplies.get(body.method);
-    } else if (error) {
-      reply = { jsonrpc: "2.0", id: body.id ?? null, error };
-    } else if (handler) {
-      reply = { jsonrpc: "2.0", id: body.id ?? null, result: handler(body.params) };
-    } else {
-      reply = { jsonrpc: "2.0", id: body.id ?? null, error: { code: -32601, message: "Method not implemented" } };
+      return this.rawRpcReplies.get(body.method);
     }
-    response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(reply));
+    const error = this.rpcErrors.get(body.method);
+    if (error) {
+      return { jsonrpc: "2.0", id: body.id ?? null, error };
+    }
+    const result = this.rpcHandlers.get(body.method)?.(body.params);
+    if (result !== undefined) {
+      return { jsonrpc: "2.0", id: body.id ?? null, result };
+    }
+    return { jsonrpc: "2.0", id: body.id ?? null, error: { code: -32601, message: "Method not implemented" } };
   }
 }
 

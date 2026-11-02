@@ -86,10 +86,10 @@ describe("configuration", () => {
   });
 
   it("rejects an unsupported transport type by name", () => {
-    const transport = { type: "socket", path: "/run/signal-cli.sock" } as unknown as SignalTransportConfig;
+    const transport = { type: "dbus" } as unknown as SignalTransportConfig;
 
     expect(() => createSignalAdapter({ account: BOT_ACCOUNT, transport })).toThrow(
-      expect.objectContaining({ name: "ValidationError", message: 'Unsupported transport type "socket"' }),
+      expect.objectContaining({ name: "ValidationError", message: 'Unsupported transport type "dbus"' }),
     );
   });
 
@@ -717,13 +717,34 @@ describe("errors", () => {
     await expect(failure).rejects.toMatchObject({ retryAfter: 30 });
   });
 
-  it("explains a single-account daemon, which cannot report the Bot Account's ACI", async () => {
+  it("reads the Bot Account's ACI from listContacts on a single-account daemon", async () => {
     const fake = await FakeSignalCli.start();
-    fake.failRpc("listAccounts", { code: -32601, message: "Method not implemented" });
+    fake.singleAccount = true;
+    const { adapter } = await bot({ fake });
+
+    expect(adapter.botUserId).toBe(BOT_ACI);
+    expect(fake.rpcRequests("listContacts").map((request) => request.params)).toEqual([
+      { recipient: [BOT_ACCOUNT], allRecipients: true },
+    ]);
+  });
+
+  it("rejects a single-account daemon that does not know the Bot Account", async () => {
+    const fake = await FakeSignalCli.start();
+    fake.singleAccount = true;
+    fake.accounts = [{ number: "+15559999999", aci: BOB_ACI }];
+    const { chat } = await bot({ fake, initialize: false });
+
+    await expect(chat.initialize()).rejects.toBeInstanceOf(AuthenticationError);
+  });
+
+  it("rejects a malformed listContacts reply as a network error", async () => {
+    const fake = await FakeSignalCli.start();
+    fake.singleAccount = true;
+    fake.replyRpcRaw("listContacts", { jsonrpc: "2.0", id: 3, result: {} });
     const { chat } = await bot({ fake, initialize: false });
 
     await expect(chat.initialize()).rejects.toThrow(
-      expect.objectContaining({ name: "ValidationError", message: expect.stringContaining("single-account mode") }),
+      expect.objectContaining({ name: "NetworkError", message: expect.stringContaining("listContacts returned a malformed") }),
     );
   });
 });

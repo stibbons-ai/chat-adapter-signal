@@ -6,7 +6,7 @@ import {
   type AdapterError,
 } from "@chat-adapter/shared";
 import type { ReceiveEvent } from "../envelope.js";
-import { ADAPTER_NAME, fromJsonRpcError, unreachable, type JsonRpcErrorObject } from "../errors.js";
+import { ADAPTER_NAME, fromJsonRpcError, malformedResponse, unreachable, type JsonRpcErrorObject } from "../errors.js";
 import { parseEventStream } from "./sse.js";
 import type { EventListener, EventSubscription, SignalTransport } from "./types.js";
 
@@ -77,7 +77,7 @@ export class HttpTransport implements SignalTransport {
       throw new NetworkError(ADAPTER_NAME, `signal-cli JSON-RPC ${method} returned an unreadable response`, error as Error);
     }
     if (typeof payload !== "object" || payload === null || !("result" in payload || "error" in payload)) {
-      throw new NetworkError(ADAPTER_NAME, `signal-cli JSON-RPC ${method} returned a malformed response`);
+      throw malformedResponse(method);
     }
     if (payload.error) {
       throw fromJsonRpcError(payload.error, method);
@@ -139,6 +139,9 @@ export class HttpTransport implements SignalTransport {
       },
     };
   }
+
+  /** Nothing to release: every request is its own HTTP exchange, and `subscribe()` returns its own `close()`. */
+  async close(): Promise<void> {}
 
   private async fetchPath(path: string, init: RequestInit, what: string): Promise<Response> {
     try {

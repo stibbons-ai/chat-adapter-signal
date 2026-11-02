@@ -29,6 +29,8 @@ export interface SignalEnvelope {
 
 /** A receive notification from signal-cli for the Bot Account. */
 export interface ReceiveEvent {
+  /** The receiving account as signal-cli names it: its number, or its ACI when it has none. */
+  account?: string;
   envelope?: SignalEnvelope;
   exception?: unknown;
 }
