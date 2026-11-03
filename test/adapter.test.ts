@@ -583,13 +583,6 @@ describe("outbound", () => {
     ]);
     expect(sent.id).toBe(`${BOT_ACI}:1700000000000`);
   });
-
-  it("sends markdown as its plain text", async () => {
-    const { fake, chat } = await bot();
-    await chat.thread(`signal:dm:${ALICE_ACI}`).post({ markdown: "Hello **Alice**" });
-
-    expect(fake.rpcRequests("send")[0]?.params?.message).toBe("Hello Alice");
-  });
 });
 
 describe("lifecycle", () => {

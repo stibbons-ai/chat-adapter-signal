@@ -102,10 +102,10 @@ export class FakeSignalCli {
       const wanted = params?.groupId as string[] | undefined;
       return this.groups.filter((group) => !wanted || wanted.includes(group.id));
     });
-    this.rpcHandlers.set("send", () => ({
-      timestamp: this.nextSendTimestamp++,
-      results: [{ type: "SUCCESS" }],
-    }));
+    // signal-cli 0.14.9 answers each of these with the sent timestamp and per-recipient results.
+    for (const method of ["send", "remoteDelete", "sendReaction", "sendReceipt"]) {
+      this.rpcHandlers.set(method, () => ({ timestamp: this.nextSendTimestamp++, results: [{ type: "SUCCESS" }] }));
+    }
   }
 
   static async start(): Promise<FakeSignalCli> {
@@ -480,6 +480,37 @@ export function groupTextEnvelope(options: {
           attachments: [],
         },
       }),
+    },
+  };
+}
+
+/**
+ * A reaction envelope as signal-cli 0.14.9 emits it (`JsonReaction` in the data
+ * message, `message` null), in a 1:1 Conversation or, with `groupId`, a Group.
+ */
+export function reactionEnvelope(options: {
+  aci: string;
+  emoji: string;
+  targetAuthor: string;
+  targetTimestamp: number;
+  remove?: boolean;
+  groupId?: string;
+}) {
+  const envelope = directTextEnvelope({ aci: options.aci, text: "" });
+  return {
+    ...envelope,
+    dataMessage: {
+      ...envelope.dataMessage,
+      message: null,
+      reaction: {
+        emoji: options.emoji,
+        targetAuthor: options.targetAuthor,
+        targetAuthorNumber: null,
+        targetAuthorUuid: options.targetAuthor,
+        targetSentTimestamp: options.targetTimestamp,
+        isRemove: options.remove ?? false,
+      },
+      ...(options.groupId && { groupInfo: { groupId: options.groupId, groupName: "Test Group", revision: 3, type: "DELIVER" } }),
     },
   };
 }
