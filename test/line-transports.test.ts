@@ -362,15 +362,17 @@ describe("socket and TCP transports", () => {
       config: { account: BOT_ACCOUNT, transport: { type: "tcp", host: "127.0.0.1", port }, drainTimeoutMs: 0 },
     });
     cleanups.push(() => started.chat.shutdown());
-    const { chat, nextDirectMessage } = started;
+    const { chat, adapter, nextDirectMessage } = started;
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
+    // Through the adapter: after shutdown, `thread.post` would fail recording the post in Chat's
+    // (now disconnected) history, after signal-cli sent it.
     const replied = new Promise<void>((resolve) => {
       chat.onDirectMessage(async (thread) => {
         await gate;
-        await thread.post("late reply");
+        await adapter.postMessage(thread.id, "late reply");
         resolve();
       });
     });
@@ -382,7 +384,7 @@ describe("socket and TCP transports", () => {
 
     fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "while nobody listens" }));
     // The fake writes in order: once this reply is back, the message above has reached the adapter.
-    await thread.post("barrier");
+    await adapter.postMessage(thread.id, "barrier");
     await chat.initialize();
     fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "after restart" }));
 

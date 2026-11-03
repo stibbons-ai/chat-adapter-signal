@@ -12,6 +12,7 @@ const FAKE_BUFFER_EVENTS = 1000;
 let fakeInstances = 0;
 export const ALICE_ACI = "a1b2c3d4-0000-4000-8000-00000000a11c";
 export const BOB_ACI = "b0b0b0b0-0000-4000-8000-000000000b0b";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export interface RecordedRequest {
   /** HTTP path and query, or `line` for a request over a line-delimited JSON-RPC connection. */
@@ -43,6 +44,13 @@ export class FakeSignalCli {
   readonly requests: RecordedRequest[] = [];
   version = "0.14.9";
   accounts: Array<{ number: string | null; aci: string | null }> = [{ number: BOT_ACCOUNT, aci: BOT_ACI }];
+  /**
+   * Other Signal users the fake can resolve, as `listContacts` entries (`JsonContact`; `uuid` is the ACI,
+   * null when only a PNI is known). Found by number, ACI or `u:<username>`, like signal-cli's server lookups.
+   */
+  contacts: Array<Record<string, unknown> & { number: string | null; uuid: string | null; username: string | null }> = [];
+  /** Groups the Bot Account is in, as `listGroups` entries (`JsonGroup`; `id` in standard base64). */
+  groups: Array<Record<string, unknown> & { id: string }> = [];
   /** Status for `/api/v1/check` and every other endpoint, e.g. 401 to act like an auth proxy. */
   httpStatus = 200;
   /** Response headers sent with a non-200 `httpStatus`, e.g. `Retry-After`. */
@@ -76,12 +84,23 @@ export class FakeSignalCli {
     this.server = createServer((request, response) => void this.handle(request, response));
     this.rpcHandlers.set("version", () => ({ version: this.version }));
     this.rpcHandlers.set("listAccounts", () => (this.singleAccount ? undefined : this.accounts));
-    // signal-cli 0.14.9 ListContactsCommand JSON output: the ACI is `uuid`.
+    // signal-cli 0.14.9 ListContactsCommand JSON output: the ACI is `uuid`. Like signal-cli, an ACI it
+    // has not seen yet gets a new, empty recipient entry (RecipientStore.resolveRecipientLocked).
     this.rpcHandlers.set("listContacts", (params) => {
       const wanted = (params?.recipient as string[] | undefined) ?? [];
-      return this.accounts
-        .filter((entry) => wanted.includes(entry.number ?? "") || wanted.includes(entry.aci ?? ""))
-        .map((entry) => ({ number: entry.number, uuid: entry.aci, username: null, name: "" }));
+      const own = this.accounts.map((entry) => ({ number: entry.number, uuid: entry.aci, username: null, name: "" }));
+      const found = [...own, ...this.contacts].filter(
+        (entry) =>
+          wanted.includes(entry.number ?? "") ||
+          wanted.includes(entry.uuid ?? "") ||
+          (entry.username !== null && wanted.includes(`u:${entry.username}`)),
+      );
+      const unseen = wanted.filter((recipient) => UUID_PATTERN.test(recipient) && !found.some((entry) => entry.uuid === recipient));
+      return [...found, ...unseen.map((uuid) => ({ number: null, uuid, username: null, name: "", profile: null }))];
+    });
+    this.rpcHandlers.set("listGroups", (params) => {
+      const wanted = params?.groupId as string[] | undefined;
+      return this.groups.filter((group) => !wanted || wanted.includes(group.id));
     });
     // signal-cli 0.14.9 answers each of these with the sent timestamp and per-recipient results.
     for (const method of ["send", "remoteDelete", "sendReaction", "sendReceipt"]) {

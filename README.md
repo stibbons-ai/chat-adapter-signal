@@ -215,6 +215,37 @@ several whole lines as a code block). `message.text` is the text as sent, with m
 without styles is taken literally: `*stars*` and `||bars||` typed on Signal stay as typed, also
 when `message.formatted` is posted back.
 
+## History, users and DMs
+
+Signal keeps no history on a server, so the adapter sets `persistThreadHistory` and Chat records
+each Conversation in its state adapter: every message it hands to a handler and every
+`thread.post`. `fetchMessages` (and so `thread.messages`, `thread.allMessages`, `chat.history.thread`)
+returns that record, oldest first, paged by message ID: what the bot saw since it started, within
+Chat's `history.thread` limits (default 100 messages per Conversation, 7 days). Recorded messages have
+`raw: null`, and the bot's own posts carry Chat's `author.userId: "self"` with `isMe: true`.
+The record is keyed by thread ID only, so give each Bot Account its own state store. Recording
+needs the state store: a handler still running after `chat.shutdown()` gets an error from
+`thread.post` even though signal-cli already sent the message.
+
+`fetchThread` names a 1:1 Conversation after the user (`metadata.aci`; the ACI when signal-cli knows
+no name) and a Group after its Signal name (`metadata.groupId`, `description`, `members` as ACIs,
+leaving out members signal-cli knows no ACI for); a Group the Bot Account is not or no longer in
+throws `ResourceNotFoundError`. `getUser(aci)` returns `userId` and `userName` as the ACI and
+`fullName` as signal-cli names the sender in messages (nickname, contact name, profile name), failing
+those the phone number, then the username; `null` when signal-cli knows none of these for the ACI.
+
+`adapter.openDM(user)` takes an ACI, a phone number (`+15550001111`) or `u:<username>` and returns
+`signal:dm:<ACI>`; signal-cli looks numbers and usernames up on the Signal server, and a user it
+finds no ACI for (unknown, or a number its owner hides) throws `ResourceNotFoundError`. Chat's own
+`chat.openDM(...)` and `chat.getUser(...)` cannot tell a Signal ID from another platform's, so call
+the adapter and open the thread yourself:
+
+```ts
+const signal = chat.getAdapter("signal");
+const thread = chat.thread(await signal.openDM("+15550001111"));
+await thread.post("Hello!");
+```
+
 ## Errors
 
 signal-cli failures surface as `@chat-adapter/shared` errors (signal-cli JSON-RPC codes in parentheses):
@@ -223,7 +254,7 @@ signal-cli failures surface as `@chat-adapter/shared` errors (signal-cli JSON-RP
 |---|---|
 | `AuthenticationError` | HTTP 401/403 (e.g. from a reverse proxy), or the daemon does not serve the Bot Account (`-32602` "Specified account does not exist", or the account is missing from `listAccounts`/`listContacts` at startup) |
 | `AdapterRateLimitError` | signal-cli rate-limit error (`-5`), or HTTP 429; `retryAfter` in seconds when known |
-| `ResourceNotFoundError` | The recipient is not registered with Signal (`-1`) |
+| `ResourceNotFoundError` | The recipient is not registered with Signal (`-1`); `openDM` finds no ACI for a number or username; `fetchThread` of a Group the Bot Account is not in |
 | `ValidationError` | Invalid request or parameters (`-32600`, other `-32602`, other `-1` user errors) |
 | `NetworkError` | signal-cli unreachable or not startable, a spawned signal-cli that exited, a dropped socket, other HTTP failures, malformed replies, signal-cli I/O errors (`-3`), or a send where every recipient failed on the network (`-1` with `NETWORK_FAILURE` results) |
 | `AdapterError` with `code` | `UNTRUSTED_IDENTITY` (`-4`), `CAPTCHA_REJECTED` (`-6`), `METHOD_NOT_FOUND` (`-32601`), `SIGNAL_CLI_ERROR` (anything else, e.g. `-32603`); from `initialize()`, `STARTUP_CANCELLED` when `disconnect()` ran during startup |
