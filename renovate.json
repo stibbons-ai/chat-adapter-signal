@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Keeps the signal-cli image in the example current: signal-cli releases older than about three months may stop working with Signal's servers.",
+  "description": "Keeps the example's signal-cli image tag current.",
   "enabledManagers": ["docker-compose"],
   "packageRules": [
     {

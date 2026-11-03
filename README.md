@@ -20,7 +20,7 @@ package from this repository.
 - Node.js 24 or newer, ESM only.
 - `chat` ^4.43 (peer dependency), plus a Chat state adapter (`@chat-adapter/state-memory` to try it out;
   a persistent one such as Redis in production, see Reliable receive).
-- signal-cli 0.14.9 or newer, installed and kept current by you, with the Bot Account already registered
+- signal-cli 0.14.9 or newer, installed by you, with the Bot Account already registered
   or linked (see [Provisioning the Bot Account](#provisioning-the-bot-account)). The adapter warns at
   startup when signal-cli is older. Either run it as a daemon (`signal-cli daemon --http <host:port>`,
   `--socket <path>` or `--tcp <host:port>`, with or without `-a`), or let the adapter spawn it (see
@@ -123,7 +123,7 @@ compose file:
   Account's keys and state) in the `signal-cli-data` volume. It publishes no ports.
 - `echo-bot`: [`bot.ts`](examples/echo-bot/bot.ts), which answers 1:1 messages and Mentions with
   `echo: <text>`. It reaches signal-cli at `http://signal-cli:8080` (`SIGNAL_CLI_URL`) and speaks as
-  `SIGNAL_ACCOUNT`. Until the first npm release, its image builds the adapter from this checkout.
+  `SIGNAL_ACCOUNT`.
 
 ```sh
 cd examples/echo-bot
@@ -140,8 +140,7 @@ compose restarts it.
 `--receive-mode on-start` (signal-cli's default, spelled out) makes signal-cli receive from Signal from
 the moment it starts, also while the Host App is disconnected; from the Host App's first connection on,
 it buffers what arrives so the adapter can replay it after a reconnect. Messages signal-cli receives
-after it (re)starts and before the Host App connects are not replayed. `--no-receive-stdout` keeps
-message contents out of the container log, where signal-cli otherwise prints every message it receives.
+after it (re)starts and before the Host App connects are not replayed.
 
 The image comes from its publisher; this repository publishes no signal-cli image (see
 [ADR-0001](docs/adr/0001-signal-cli-as-separate-program.md)).
@@ -185,14 +184,6 @@ docker compose run --rm signal-cli -a +15550000001 verify 123-456
 
 Set a profile name so users see who answers, e.g.
 `docker compose run --rm signal-cli -a +15550000001 updateProfile --given-name "Echo bot"`.
-
-### Keeping signal-cli current
-
-Signal changes its server over time, and signal-cli releases older than about three months may stop
-working. Update the image tag regularly; this repository's [`renovate.json`](renovate.json) makes
-Renovate open a pull request for each new `signal-cli-native` tag (the tag scheme
-`v<major>-<minor>-<patch>-<build>` needs its `regex` versioning; copy that rule into your own Renovate
-config). After updating: `docker compose pull signal-cli && docker compose up -d`.
 
 ## Security
 
@@ -260,12 +251,14 @@ proxy and scheme works, e.g. a bearer token checked by the proxy, as long as the
 
 ## Deployment
 
-- The Host App must be a long-running process (a container, a VM, a server such as Mastra): the adapter
-  receives only while it holds the event stream open. Serverless and edge functions don't work; there
-  are no webhooks (`handleWebhook` answers 501).
-- Keep signal-cli current (see [Keeping signal-cli current](#keeping-signal-cli-current)).
-- Use a persistent Chat state adapter (e.g. Redis) so the adapter resumes after a Host App restart (see
-  Reliable receive).
+The Host App must be a long-running process (a container, a VM, a server such as Mastra): the adapter
+receives only while it holds the event stream open. Serverless and edge functions don't work.
+
+Keep signal-cli current: Signal changes its server over time, and signal-cli releases older than about
+three months may stop working. Update the image tag regularly; this repository's
+[`renovate.json`](renovate.json) makes Renovate open a pull request for each new `signal-cli-native` tag
+(the tag scheme `v<major>-<minor>-<patch>-<build>` needs its `regex` versioning; copy that rule into
+your own Renovate config). After updating: `docker compose pull signal-cli && docker compose up -d`.
 
 ## Reliable receive
 
