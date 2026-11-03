@@ -1,7 +1,8 @@
 import { ValidationError } from "@chat-adapter/shared";
 import type { StreamChunk } from "chat";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ALICE_ACI, BOT_ACCOUNT, BOT_ACI, FakeSignalCli } from "./fake-signal-cli.js";
+import type { SignalAdapterConfig } from "../src/index.js";
+import { ALICE_ACI, BOT_ACCOUNT, BOT_ACI, directTextEnvelope, FakeSignalCli } from "./fake-signal-cli.js";
 import { startBot, type Bot } from "./helpers.js";
 
 const ALICE_DM = `signal:dm:${ALICE_ACI}`;
@@ -25,10 +26,11 @@ afterEach(async () => {
  * A started bot on the TCP transport with fake timers and clock, so typing refreshes can be
  * stepped through. One connection carries every request in order, which `advance` relies on.
  */
-async function bot(): Promise<Bot> {
+async function bot(config: Partial<SignalAdapterConfig> = {}): Promise<Bot> {
   const fake = await FakeSignalCli.start();
   const port = await fake.listenTcp();
-  const started = await startBot({ fake, config: { account: BOT_ACCOUNT, transport: { type: "tcp", host: "127.0.0.1", port } } });
+  const transport = { type: "tcp" as const, host: "127.0.0.1", port };
+  const started = await startBot({ fake, config: { account: BOT_ACCOUNT, transport, ...config } });
   bots.push(started);
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
   return started;
@@ -291,6 +293,29 @@ describe("startTyping", () => {
     expect(started.logger.entries.filter((entry) => entry.level === "warn").map((entry) => entry.message)).toContain(
       "Could not refresh a Signal typing indicator",
     );
+  });
+
+  it("keeps a stream that is still answering during shutdown typing until it posts", async () => {
+    const started = await bot({ drainTimeoutMs: 60_000 });
+    started.chat.onDirectMessage(async (thread) => {
+      await thread.post(slowStream(["still ", "thinking"], 6_000));
+    });
+    started.fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "hi" }));
+    await vi.waitFor(() => expect(started.fake.rpcRequests("sendTyping")).toHaveLength(1));
+
+    // Shutdown closes the receive connection, so no `advance` round trips: step the clock and wait for arrivals.
+    const shutdown = started.chat.shutdown();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.waitFor(() => expect(started.fake.rpcRequests("sendTyping")).toHaveLength(2));
+    await vi.advanceTimersByTimeAsync(2_000);
+    await shutdown;
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(outbound(started)).toEqual([
+      ["sendTyping", TYPING],
+      ["sendTyping", TYPING],
+      ["send", { ...TYPING, message: "still thinking" }],
+    ]);
   });
 
   it("stops every refresh on disconnect", async () => {

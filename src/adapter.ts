@@ -311,9 +311,9 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   /**
-   * Sends a message; one over Signal's 64 KiB limit goes out as several, split at paragraph
-   * breaks, and the first one's ID stands for it. Ends a typing indicator in the Conversation:
-   * the message clears it, or a STOP when sending fails.
+   * Sends a message; one over Signal's 64 KiB limit goes out as several, split preferably at
+   * paragraph breaks (see `splitSignalText`), and the first one's ID stands for it. Ends a typing
+   * indicator in the Conversation: the message clears it, or a STOP when sending fails.
    */
   async postMessage(threadId: string, message: AdapterPostableMessage): Promise<RawMessage<SignalRawMessage>> {
     const conversation = decodeThreadId(threadId);

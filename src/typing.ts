@@ -28,7 +28,7 @@ export class TypingIndicators {
 
   /**
    * Sends the indicator now (rejecting if that fails) and refreshes it for `durationMs`. While it
-   * is already up, only extends the refresh: Signal clients still show the last one.
+   * is still being refreshed, only extends the refresh: Signal clients still show the last one.
    */
   async start(threadId: string, durationMs: number): Promise<void> {
     const until = Date.now() + durationMs;

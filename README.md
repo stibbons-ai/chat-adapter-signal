@@ -199,7 +199,8 @@ typing. Signal shows no status text.
 indicator while the stream runs, then sends the whole answer as one markdown message. It never posts
 a draft and edits it: Signal allows 10 edits per message and marks edited messages. A stream that
 fails, or ends without text, sends nothing, stops the indicator, and rejects (`ValidationError` for
-an empty one).
+an empty one, also when the turn is aborted before any text). A turn aborted later posts the text
+so far.
 
 Signal takes up to 64 KiB of UTF-8 text per message (signal-cli sends text over 2000 bytes as a
 long-text attachment that clients show in place of the message, as Signal's apps do). A longer
