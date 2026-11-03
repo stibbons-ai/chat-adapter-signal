@@ -79,7 +79,7 @@ describe.each(transports)("request deadline over the %s transport", (_name, time
     const { nextDirectMessage } = await bot(fake, await transportFor(fake), true, timeoutMs);
     fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "hi" }));
     const { thread } = await nextDirectMessage();
-    fake.swallowRpc("send");
+    fake.hold("send"); // never released: signal-cli swallows the request
 
     await expect(thread.post("reply")).rejects.toThrow(timeoutError("send", timeoutMs));
     expect(fake.rpcRequests("send")).toHaveLength(1);
@@ -88,7 +88,7 @@ describe.each(transports)("request deadline over the %s transport", (_name, time
   it("fails initialize() when startup's version request is never answered", async () => {
     const fake = await startFake();
     const transport = await transportFor(fake);
-    fake.swallowRpc("version");
+    fake.hold("version"); // never released
     const { chat } = await bot(fake, transport, false, timeoutMs);
 
     await expect(chat.initialize()).rejects.toThrow(timeoutError("version", timeoutMs));
@@ -98,7 +98,7 @@ describe.each(transports)("request deadline over the %s transport", (_name, time
 
 it("fails initialize() when the HTTP health check is never answered", async () => {
   const fake = await startFake();
-  fake.swallowRpc("check");
+  fake.hold("check"); // never released
   const { chat } = await bot(fake, { type: "http", url: fake.url }, false);
 
   await expect(chat.initialize()).rejects.toThrow(

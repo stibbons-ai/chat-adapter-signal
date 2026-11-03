@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { NetworkError, ValidationError } from "@chat-adapter/shared";
 import type { ReceiveEvent } from "../envelope.js";
-import { ADAPTER_NAME, fromJsonRpcError, malformedResponse, timedOut, unreachable, type JsonRpcErrorObject } from "../errors.js";
+import { ADAPTER_NAME, fromJsonRpcError, malformedResponse, unreachable, withDeadline, type JsonRpcErrorObject } from "../errors.js";
 import type { EventListener, EventSubscription, SignalTransport, SubscribeOptions } from "./types.js";
 
 export interface SpawnTransportOptions {
@@ -122,22 +122,20 @@ export class LineTransport implements SignalTransport {
    * a late reply finds no entry and is dropped; ids are never reused, so it cannot answer another request.
    */
   async request<T>(method: string, params?: Record<string, unknown>): Promise<T> {
-    const deadline = AbortSignal.timeout(this.requestTimeoutMs);
     const id = this.nextRequestId++;
     try {
-      const connecting = this.connect();
-      const connection = await abortable(connecting, deadline);
-      const result = new Promise<unknown>((resolve, reject) =>
-        this.pending.set(id, { method, connection: connecting, resolve, reject }),
-      );
-      connection.output.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
-      return (await abortable(result, deadline)) as T;
-    } catch (error) {
-      if (error !== deadline.reason) {
-        throw error;
-      }
+      return await withDeadline(`signal-cli JSON-RPC ${method} at ${this.endpoint}`, this.requestTimeoutMs, async (signal) => {
+        const connecting = this.connect();
+        // Two waits, not one around both: a connect finishing after the deadline must not send the request.
+        const connection = await abortable(connecting, signal);
+        const result = new Promise<unknown>((resolve, reject) =>
+          this.pending.set(id, { method, connection: connecting, resolve, reject }),
+        );
+        connection.output.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+        return (await abortable(result, signal)) as T;
+      });
+    } finally {
       this.pending.delete(id);
-      throw timedOut(`signal-cli JSON-RPC ${method} (${this.endpoint})`, this.requestTimeoutMs);
     }
   }
 

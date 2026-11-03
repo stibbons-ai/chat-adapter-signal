@@ -11,8 +11,8 @@ import {
   assertTimeoutMs,
   fromJsonRpcError,
   malformedResponse,
-  timedOut,
   unreachable,
+  withDeadline,
   type JsonRpcErrorObject,
 } from "../errors.js";
 import { parseEventStream } from "./sse.js";
@@ -69,7 +69,7 @@ export class HttpTransport implements SignalTransport {
   }
 
   async checkReachable(): Promise<void> {
-    const response = await this.withDeadline("signal-cli health check", (signal) =>
+    const response = await withDeadline(`signal-cli health check at ${this.endpoint}`, this.requestTimeoutMs, (signal) =>
       this.fetchPath("/api/v1/check", { method: "GET", signal }, "health check"),
     );
     if (!response.ok) {
@@ -78,7 +78,7 @@ export class HttpTransport implements SignalTransport {
   }
 
   request<T>(method: string, params?: Record<string, unknown>): Promise<T> {
-    return this.withDeadline(`signal-cli JSON-RPC ${method}`, async (signal) => {
+    return withDeadline(`signal-cli JSON-RPC ${method} at ${this.endpoint}`, this.requestTimeoutMs, async (signal) => {
       const response = await this.fetchPath(
         "/api/v1/rpc",
         {
@@ -207,19 +207,6 @@ export class HttpTransport implements SignalTransport {
 
   /** Nothing to release: every request is its own HTTP exchange, and `subscribe()` returns its own `close()`. */
   async close(): Promise<void> {}
-
-  /**
-   * Runs one exchange under the request deadline: `signal` aborts its fetch, body read included,
-   * so a daemon that accepted the connection but never answers fails it with a timeout error.
-   */
-  private async withDeadline<T>(what: string, exchange: (signal: AbortSignal) => Promise<T>): Promise<T> {
-    const signal = AbortSignal.timeout(this.requestTimeoutMs);
-    try {
-      return await exchange(signal);
-    } catch (error) {
-      throw signal.aborted ? timedOut(`${what} at ${this.endpoint}`, this.requestTimeoutMs) : error;
-    }
-  }
 
   private async fetchPath(path: string, init: RequestInit, what: string): Promise<Response> {
     try {
