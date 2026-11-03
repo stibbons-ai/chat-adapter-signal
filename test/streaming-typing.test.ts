@@ -57,7 +57,6 @@ function outbound(started: Bot): Array<[string, unknown]> {
 async function* slowStream(chunks: Array<string | StreamChunk>, gapMs = 0): AsyncIterable<string | StreamChunk> {
   for (const chunk of chunks) {
     if (gapMs > 0) {
-      // The repo's TypeScript lib (ES2023) has no Promise.withResolvers.
       await new Promise((resolve) => setTimeout(resolve, gapMs));
     }
     yield chunk;
@@ -106,7 +105,7 @@ describe("startTyping", () => {
     ]);
   });
 
-  it("stops refreshing after a post through another thread object for the same Conversation", async () => {
+  it("stops refreshing after a post that bypasses Chat's thread (adapter.postMessage)", async () => {
     const started = await bot();
 
     await started.chat.thread(ALICE_DM).startTyping();
@@ -129,6 +128,36 @@ describe("startTyping", () => {
     await posting;
 
     expect(outbound(started).map(([method]) => method)).toEqual(["sendTyping", "sendTyping", "send"]);
+  });
+
+  it("a post waits for the first indicator still on its way (an unawaited startTyping), then stops refreshing", async () => {
+    const started = await bot();
+    const release = started.fake.holdNext("sendTyping");
+
+    const typing = started.chat.thread(ALICE_DM).startTyping();
+    const posting = started.adapter.postMessage(ALICE_DM, "done");
+    await advance(started, 1_000);
+    expect(started.fake.rpcRequests("send")).toHaveLength(0);
+    release();
+    await Promise.all([typing, posting]);
+    await advance(started, 60_000);
+
+    expect(outbound(started).map(([method]) => method)).toEqual(["sendTyping", "send"]);
+  });
+
+  it("sends a STOP when the post fails, as no message clears the indicator then", async () => {
+    const started = await bot();
+    const thread = started.chat.thread(ALICE_DM);
+    await thread.startTyping();
+    started.fake.failRpc("send", { code: -1, message: "Failed to send message" });
+
+    await expect(thread.post("done")).rejects.toThrow();
+
+    expect(outbound(started)).toEqual([
+      ["sendTyping", TYPING],
+      ["send", { ...TYPING, message: "done" }],
+      ["sendTyping", TYPING_STOP],
+    ]);
   });
 
   it("endTyping sends a STOP and ends the refresh; without active typing it sends nothing", async () => {
@@ -157,6 +186,19 @@ describe("startTyping", () => {
     expect(started.fake.rpcRequests("sendTyping")).toHaveLength(13);
   });
 
+  it("after the 2 minutes, endTyping still stops the last indicator until it fades", async () => {
+    const started = await bot();
+
+    await started.adapter.startTyping(ALICE_DM);
+    await advance(started, 125_000);
+    await started.adapter.endTyping(ALICE_DM);
+
+    expect(outbound(started).slice(12)).toEqual([
+      ["sendTyping", TYPING],
+      ["sendTyping", TYPING_STOP],
+    ]);
+  });
+
   it("a repeated startTyping extends the 2 minutes without sending a second indicator", async () => {
     const started = await bot();
 
@@ -178,6 +220,32 @@ describe("startTyping", () => {
     await expect(started.adapter.startTyping(ALICE_DM)).rejects.toThrow();
     await advance(started, 60_000);
 
+    expect(started.fake.rpcRequests("sendTyping")).toHaveLength(1);
+  });
+
+  it("shows the indicator again on the next startTyping after a failed one", async () => {
+    const started = await bot();
+    started.fake.failRpc("sendTyping", { code: -1, message: "Failed to send message" });
+    await expect(started.adapter.startTyping(ALICE_DM)).rejects.toThrow();
+    started.fake.clearRpcFailure("sendTyping");
+
+    await started.adapter.startTyping(ALICE_DM);
+    await advance(started, 10_000);
+
+    expect(started.fake.rpcRequests("sendTyping")).toHaveLength(3);
+  });
+
+  it("a second startTyping while the first indicator is on its way shares its failure", async () => {
+    const started = await bot();
+    started.fake.failRpc("sendTyping", { code: -1, message: "Failed to send message" });
+    const release = started.fake.holdNext("sendTyping");
+
+    const first = started.adapter.startTyping(ALICE_DM);
+    const second = started.adapter.startTyping(ALICE_DM);
+    release();
+
+    await expect(first).rejects.toThrow();
+    await expect(second).rejects.toThrow();
     expect(started.fake.rpcRequests("sendTyping")).toHaveLength(1);
   });
 
@@ -248,10 +316,13 @@ describe("stream", () => {
 
     await thread.startTyping();
     const posting = thread.post(slowStream(["slow ", "answer"], 92_500));
-    await advance(started, 190_000);
+    await advance(started, 60_000);
+    // A handler's startTyping during the stream must not cap the stream's typing at 2 minutes.
+    await thread.startTyping();
+    await advance(started, 130_000);
     await posting;
 
-    // One indicator at 0 s (none extra when the stream starts), refreshed up to 180 s.
+    // One indicator at 0 s (none extra when the stream starts or typing is asked again), refreshed up to 180 s.
     expect(outbound(started)).toEqual([...Array(19).fill(["sendTyping", TYPING]), ["send", { ...TYPING, message: "slow answer" }]]);
   });
 
@@ -277,6 +348,23 @@ describe("stream", () => {
       ["sendTyping", TYPING],
       ["sendTyping", TYPING_STOP],
     ]);
+  });
+
+  it("rejects with the stream's own error when the STOP fails too", async () => {
+    const started = await bot();
+    async function* failing(): AsyncIterable<string> {
+      yield "partial";
+      started.fake.failRpc("sendTyping", { code: -1, message: "Failed to send message" });
+      throw new Error("model crashed");
+    }
+
+    await expect(started.chat.thread(ALICE_DM).post(failing())).rejects.toThrow("model crashed");
+
+    expect(outbound(started)).toEqual([
+      ["sendTyping", TYPING],
+      ["sendTyping", TYPING_STOP],
+    ]);
+    expect(started.logger.entries.map((entry) => entry.message)).toContain("Could not stop a Signal typing indicator");
   });
 
   it("rejects an empty stream after stopping the indicator, as Signal cannot send an empty message", async () => {
@@ -362,6 +450,7 @@ describe("replies over Signal's 64 KiB limit", () => {
 
     await thread.post(`${line}\n${line}`);
     await thread.post(`${word} ${word}`);
+    await thread.post(`${line}\n\n\n${word}`);
     // 65 534 bytes, then an emoji (4 bytes) that must not be cut in half.
     await thread.post(`${"z".repeat(LIMIT - 2)}😀${"z".repeat(10)}`);
 
@@ -369,6 +458,8 @@ describe("replies over Signal's 64 KiB limit", () => {
       [line, undefined],
       [line, undefined],
       [word, undefined],
+      [word, undefined],
+      [line, undefined],
       [word, undefined],
       ["z".repeat(LIMIT - 2), undefined],
       [`😀${"z".repeat(10)}`, undefined],

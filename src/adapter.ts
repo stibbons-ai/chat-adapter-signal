@@ -311,14 +311,23 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
 
   /**
    * Sends a message; one over Signal's 64 KiB limit goes out as several, split at paragraph
-   * breaks, and the first one's ID stands for it. Ends a typing indicator in the Conversation.
+   * breaks, and the first one's ID stands for it. Ends a typing indicator in the Conversation:
+   * the message clears it, or a STOP when sending fails.
    */
   async postMessage(threadId: string, message: AdapterPostableMessage): Promise<RawMessage<SignalRawMessage>> {
     const conversation = decodeThreadId(threadId);
     const botAci = this.requireBotAci();
     const [first, ...rest] = splitSignalText(this.formatConverter.renderSignal(message));
-    await this.typing.stop(threadId);
-    const result = await this.send(conversation, first!);
+    const wasTyping = await this.typing.stop(threadId);
+    let result: SignalSendResult;
+    try {
+      result = await this.send(conversation, first!);
+    } catch (error) {
+      if (wasTyping) {
+        await this.stopTypingQuietly(threadId);
+      }
+      throw error;
+    }
     for (const part of rest) {
       await this.send(conversation, part);
     }
@@ -347,7 +356,10 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
         throw new ValidationError(ADAPTER_NAME, "The stream produced no text to send");
       }
     } catch (error) {
-      await this.endTyping(threadId);
+      // The stream's own error is what the caller needs, not a failed STOP.
+      if (await this.typing.stop(threadId)) {
+        await this.stopTypingQuietly(threadId);
+      }
       throw error;
     }
     return this.postMessage(threadId, { markdown });
@@ -518,6 +530,15 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       ...recipientParams(decodeThreadId(threadId)),
       ...(stop ? { stop: true } : {}),
     });
+  }
+
+  /** A STOP on a failure path: logged, not thrown, so the failure that led here reaches the caller. */
+  private async stopTypingQuietly(threadId: string): Promise<void> {
+    try {
+      await this.sendTyping(threadId, true);
+    } catch (error) {
+      this.logger?.warn("Could not stop a Signal typing indicator", { error });
+    }
   }
 
   private async sendReaction(threadId: string, messageId: string, emoji: EmojiValue | string, remove: boolean): Promise<void> {

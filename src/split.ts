@@ -32,6 +32,8 @@ export function splitSignalText(body: SignalText): SignalText[] {
         if (at > start) {
           end = at;
           next = at;
+          // A longer run (three newlines, two spaces) is dropped whole, on both sides of the match.
+          while (end - 1 > start && text[end - 1] === separator[0]) end--;
           while (text[next] === separator[0]) next++;
           break;
         }
@@ -56,7 +58,7 @@ function fittingEnd(text: string, start: number, maxBytes: number): number {
     const code = text.charCodeAt(index);
     const low = text.charCodeAt(index + 1);
     const pair = code >= 0xd800 && code <= 0xdbff && low >= 0xdc00 && low <= 0xdfff;
-    // A lone surrogate is sent as U+FFFD, 3 bytes.
+    // A lone surrogate counts as U+FFFD, 3 bytes: signal-cli sends it as "?", 1 byte, so this errs short.
     const size = pair ? 4 : code < 0x80 ? 1 : code < 0x800 ? 2 : 3;
     if (bytes + size > maxBytes) {
       break;

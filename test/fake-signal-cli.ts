@@ -214,6 +214,11 @@ export class FakeSignalCli {
     this.rpcErrors.set(method, error);
   }
 
+  /** Answer `method` normally again after `failRpc`. */
+  clearRpcFailure(method: string): void {
+    this.rpcErrors.delete(method);
+  }
+
   /** Answer every later call of `method` with this exact JSON body, valid JSON-RPC or not (as a broken proxy might). */
   replyRpcRaw(method: string, body: unknown): void {
     this.rawRpcReplies.set(method, body);

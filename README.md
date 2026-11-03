@@ -190,9 +190,10 @@ edits, remote deletes, receipts, typing indicators, story replies, and legacy-gr
 ## Streaming and typing
 
 `thread.startTyping()` shows Signal's typing indicator and re-sends it every 10 seconds (Signal
-clients hide it 15 seconds after the last one) until the bot posts to the Conversation, Chat ends
-it (`endTyping`, which sends Signal's typing STOP), or 2 minutes pass, so a handler that fails
-before replying does not leave the bot typing. Signal shows no status text.
+clients hide it 15 seconds after the last one) until the bot posts to the Conversation (the message
+clears the indicator; a post that fails sends Signal's typing STOP instead), `adapter.endTyping()`
+sends a STOP, or 2 minutes pass, so a handler that fails before replying does not leave the bot
+typing. Signal shows no status text.
 
 `thread.post(stream)` (an AI SDK text or full stream, or any async iterable of text) shows the typing
 indicator while the stream runs, then sends the whole answer as one markdown message. It never posts
@@ -203,8 +204,9 @@ an empty one).
 Signal takes up to 64 KiB of UTF-8 text per message (signal-cli sends text over 2000 bytes as a
 long-text attachment that clients show in place of the message, as Signal's apps do). A longer
 post or streamed answer goes out as several messages, split at the last paragraph break that fits
-(else a line break, else a space), each with its own formatting; the first message's ID stands for
-the reply.
+(else a line break, else a space), each with its own formatting. The first message's ID stands for
+the reply: `sent.edit()` and `sent.delete()` act on that message only. If a later part fails to
+send, the earlier ones stay sent and the post rejects.
 
 ## Formatting
 

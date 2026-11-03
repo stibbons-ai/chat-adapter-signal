@@ -1,7 +1,6 @@
-/**
- * Signal clients hide a typing indicator 15 s after the last STARTED (signal-cli `sendTyping`;
- * Signal-Android `RECIPIENT_TYPING_TIMEOUT`); Signal-Android refreshes its own every 10 s.
- */
+/** Signal clients hide a typing indicator 15 s after the last STARTED (signal-cli `sendTyping`; Signal-Android `RECIPIENT_TYPING_TIMEOUT`). */
+const TYPING_VISIBLE_MS = 15_000;
+/** Signal-Android refreshes its own indicator every 10 s. */
 const TYPING_REFRESH_MS = 10_000;
 
 /** How long `startTyping` keeps refreshing without a post or `endTyping`, so a handler that fails before replying does not leave the bot typing. */
@@ -9,9 +8,13 @@ export const TYPING_MAX_MS = 2 * 60_000;
 
 interface Typing {
   until: number;
+  /** The first indicator's send; rejects if it failed. */
+  started: Promise<void>;
+  /** The latest indicator on its way to signal-cli; never rejects. */
+  refreshing: Promise<void>;
   timer?: NodeJS.Timeout;
-  /** The latest indicator on its way to signal-cli. */
-  refreshing?: Promise<void>;
+  /** Past `until`: no more refreshes, the last indicator is still visible. */
+  fading?: boolean;
 }
 
 /** Keeps a typing indicator alive per Conversation (thread ID) by re-sending it until stopped or `until` passes. */
@@ -30,16 +33,18 @@ export class TypingIndicators {
   async start(threadId: string, durationMs: number): Promise<void> {
     const until = Date.now() + durationMs;
     const current = this.active.get(threadId);
-    if (current) {
+    if (current && !current.fading) {
       current.until = Math.max(current.until, until);
+      // Shares the outcome of a first indicator still on its way.
+      await current.started;
       return;
     }
-    const typing: Typing = { until };
+    clearTimeout(current?.timer);
+    const started = this.send(threadId);
+    const typing: Typing = { until, started, refreshing: started.catch(() => {}) };
     this.active.set(threadId, typing);
-    const sent = this.send(threadId);
-    typing.refreshing = sent.catch(() => {});
     try {
-      await sent;
+      await started;
     } catch (error) {
       if (this.active.get(threadId) === typing) {
         this.active.delete(threadId);
@@ -77,8 +82,14 @@ export class TypingIndicators {
 
   private schedule(threadId: string, typing: Typing): void {
     if (Date.now() + TYPING_REFRESH_MS > typing.until) {
-      // The last indicator sent fades on its own.
-      this.active.delete(threadId);
+      // Until the last indicator fades, a post still waits for it and `stop` reports it.
+      typing.fading = true;
+      typing.timer = setTimeout(() => {
+        if (this.active.get(threadId) === typing) {
+          this.active.delete(threadId);
+        }
+      }, TYPING_VISIBLE_MS);
+      typing.timer.unref();
       return;
     }
     typing.timer = setTimeout(() => {
