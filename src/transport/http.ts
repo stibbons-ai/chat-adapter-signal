@@ -1,3 +1,6 @@
+import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { Readable } from "node:stream";
 import {
   AdapterRateLimitError,
   AuthenticationError,
@@ -81,17 +84,14 @@ export class HttpTransport implements SignalTransport {
   request<T>(method: string, params?: Record<string, unknown>, { transferBytes }: RequestOptions = {}): Promise<T> {
     const deadlineMs = requestDeadlineMs(this.requestTimeoutMs, transferBytes);
     return withDeadline(`signal-cli JSON-RPC ${method} at ${this.endpoint}`, deadlineMs, async (signal) => {
-      const response = await this.fetchPath(
+      const response = await this.post(
         "/api/v1/rpc",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", id: this.nextRequestId++, method, params }),
-          signal,
-        },
+        JSON.stringify({ jsonrpc: "2.0", id: this.nextRequestId++, method, params }),
+        signal,
         `JSON-RPC ${method}`,
       );
       if (!response.ok) {
+        await response.body?.cancel().catch(() => {}); // release the connection
         throw fromHttpStatus(response, `signal-cli JSON-RPC ${method}`);
       }
       let payload: JsonRpcResponse<T> | null;
@@ -220,4 +220,44 @@ export class HttpTransport implements SignalTransport {
       throw unreachable(`${what} at ${this.endpoint}`, error);
     }
   }
+
+  /**
+   * POSTs JSON with node:http(s), not fetch: undici (behind Node's fetch) fails a request whose
+   * response headers take over 300 s (`headersTimeout`), and signal-cli answers a `send` only after
+   * it uploaded the attachments to Signal. Only `signal` (the request's deadline) bounds this one.
+   */
+  private post(path: string, body: string, signal: AbortSignal, what: string): Promise<Response> {
+    return new Promise((resolve, reject) => {
+      const fail = (error: unknown) => reject(unreachable(`${what} at ${this.endpoint}`, error));
+      try {
+        const url = new URL(this.endpoint + path);
+        const send = url.protocol === "https:" ? httpsRequest : httpRequest;
+        const headers = { ...this.headers, "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(body)) };
+        const request = send(url, { method: "POST", headers, signal }, (incoming) => {
+          const status = incoming.statusCode!;
+          // Statuses that carry no body: a Response with one would throw.
+          const nullBody = status === 204 || status === 205 || status === 304;
+          if (nullBody) {
+            incoming.resume();
+          }
+          const content = nullBody ? null : (Readable.toWeb(incoming) as ReadableStream<Uint8Array>);
+          resolve(new Response(content, { status, headers: responseHeaders(incoming.headers) }));
+        });
+        request.on("error", fail);
+        request.end(body);
+      } catch (error) {
+        fail(error); // an invalid URL or header, as fetch would reject
+      }
+    });
+  }
+}
+
+function responseHeaders(incoming: IncomingHttpHeaders): Headers {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(incoming)) {
+    for (const item of Array.isArray(value) ? value : value === undefined ? [] : [value]) {
+      headers.append(name, item);
+    }
+  }
+  return headers;
 }

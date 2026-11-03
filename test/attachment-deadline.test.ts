@@ -138,6 +138,33 @@ describe.each(transports)("attachment deadline over the %s transport", { timeout
   });
 });
 
+it("is not cut short over HTTP by the fetch client's response-headers timeout", { timeout: 15_000 }, async () => {
+  // Node's fetch (undici) fails a request whose response headers take over 300 s; signal-cli sends
+  // them for `send` only after uploading the attachments to Signal. Node exports no undici Agent, so
+  // the test builds one from the global dispatcher's class with the limit scaled down. undici's
+  // timers tick about once a second, so 100 ms fires after about 1 s; the reply comes after 2.5 s.
+  await fetch("data:,").catch(() => {}); // creates the global dispatcher
+  const key = Symbol.for("undici.globalDispatcher.1");
+  const original = Reflect.get(globalThis, key) as { constructor: new (options: object) => { close(): Promise<void> } };
+  const strict = new original.constructor({ headersTimeout: 100 });
+  Reflect.set(globalThis, key, strict);
+  cleanups.push(async () => {
+    Reflect.set(globalThis, key, original);
+    await strict.close();
+  });
+  const fake = await startFake();
+  const { adapter } = await bot(fake, { type: "http", url: fake.url }, REQUEST_TIMEOUT_MS);
+  const release = fake.hold("send"); // uploading to Signal: no response headers yet
+  setTimeout(release, 2_500);
+
+  const sent = await adapter.postMessage(`signal:dm:${ALICE_ACI}`, {
+    markdown: "report",
+    files: [{ data: Buffer.alloc(rawBytesFor(4_000), 7), filename: "report.bin" }],
+  });
+
+  expect(sent.raw.timestamp).toEqual(expect.any(Number));
+});
+
 describe("getAttachment deadline", () => {
   /** The `transferBytes` that fetching an attachment reporting `size` asks the transport for. */
   async function transferBytesFor(size: unknown): Promise<number | undefined> {
