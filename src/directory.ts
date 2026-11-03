@@ -23,6 +23,9 @@ export interface SignalGroup {
   members?: Array<{ uuid?: string | null } | null> | null;
 }
 
+/** A contact signal-cli knows the ACI of. */
+type AciContact = SignalContact & { uuid: string };
+
 /**
  * The contact signal-cli resolves `recipient` (an ACI, a phone number, or
  * `u:<username>`) to, or `undefined` when it knows no ACI for it. signal-cli
@@ -32,13 +35,13 @@ export async function findContact(
   transport: SignalTransport,
   account: string,
   recipient: string,
-): Promise<SignalContact & { uuid: string } | undefined> {
+): Promise<AciContact | undefined> {
   const contacts = await listOf<SignalContact>(transport, "listContacts", {
     account,
     recipient: [recipient],
     allRecipients: true,
   });
-  return contacts.find((contact): contact is SignalContact & { uuid: string } => isAci(contact.uuid));
+  return contacts.find((contact): contact is AciContact => isAci(contact.uuid));
 }
 
 /** The Group with this standard-base64 ID, or `undefined` when the Bot Account does not know it. */
@@ -51,7 +54,7 @@ export async function findGroup(transport: SignalTransport, account: string, gro
  * The name signal-cli puts in an envelope's `sourceName` (`getContactOrProfileName`):
  * the nickname, else the contact name, else the profile name; then the number, then the ACI.
  */
-export function contactDisplayName(contact: SignalContact & { uuid: string }): string {
+export function contactDisplayName(contact: AciContact): string {
   return (
     joinName(contact.nickGivenName, contact.nickFamilyName) ||
     contact.name ||

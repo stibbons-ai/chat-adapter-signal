@@ -16,9 +16,10 @@ export function historyPage<T>(messages: Message<T>[], options: FetchOptions): F
   if (at === -1) {
     return { messages: [] };
   }
+  const forward = options.direction === "forward";
   let start: number;
   let end: number;
-  if (options.direction === "forward") {
+  if (forward) {
     start = at === undefined ? 0 : at + 1;
     end = Math.min(messages.length, start + limit);
   } else {
@@ -26,7 +27,7 @@ export function historyPage<T>(messages: Message<T>[], options: FetchOptions): F
     start = Math.max(0, end - limit);
   }
   const page = messages.slice(start, end);
-  const more = options.direction === "forward" ? end < messages.length : start > 0;
-  const nextCursor = more ? page.at(options.direction === "forward" ? -1 : 0)?.id : undefined;
+  const more = forward ? end < messages.length : start > 0;
+  const nextCursor = more ? page.at(forward ? -1 : 0)?.id : undefined;
   return nextCursor === undefined ? { messages: page } : { messages: page, nextCursor };
 }
