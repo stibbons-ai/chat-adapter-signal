@@ -496,7 +496,8 @@ function resolveMentions(body: string, mentions: readonly SignalMention[]) {
   let cursor = 0;
   for (const mention of [...mentions].sort((a, b) => a.start - b.start)) {
     const end = mention.start + mention.length;
-    if (mention.start < cursor || mention.length === 0 || end > body.length) {
+    const valid = Number.isSafeInteger(mention.start) && Number.isSafeInteger(mention.length) && mention.length > 0;
+    if (!valid || mention.start < cursor || end > body.length) {
       continue;
     }
     text += body.slice(cursor, mention.start);

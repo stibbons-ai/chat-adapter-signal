@@ -110,9 +110,10 @@ describe("outbound markdown", () => {
     expect(await send({ markdown: "- [x] done\n- [ ] todo\n- plain" })).toEqual({ message: "• ☑ done\n• ☐ todo\n• plain" });
   });
 
-  it("pairs several spoilers in one run, indents under ordered markers and in quotes, keeps an undefined reference as text", async () => {
-    expect(await send({ markdown: "||a|| and ||b||\n\n1. a\n   - b\n\n[x][missing] ![](https://e.com/i.png)\n\n> p1\n>\n> - q" })).toEqual({
-      message: "a and b\n\n1. a\n   • b\n\n[x][missing] https://e.com/i.png\n\n> p1\n> \n> • q",
+  it("pairs several spoilers in one run, indents under ordered markers and in quotes, keeps an unresolved reference as typed", async () => {
+    const markdown = "||a|| and ||b||\n\n1. a\n   - b\n\n[x][missing] ![](https://e.com/i.png) ![pic](https://e.com/p.png)\n\n> p1\n>\n> - q\n\n||||x||";
+    expect(await send({ markdown })).toEqual({
+      message: "a and b\n\n1. a\n   • b\n\n[x][missing] https://e.com/i.png pic (https://e.com/p.png)\n\n> p1\n> \n> • q\n\n||||x||",
       textStyle: ["0:1:SPOILER", "6:1:SPOILER"],
     });
   });
@@ -123,6 +124,11 @@ describe("outbound markdown", () => {
 
   it("rejects a postable message of unknown shape like Chat's own converter", () => {
     expect(() => new SignalFormatConverter().renderSignal({} as never)).toThrow("Invalid PostableMessage format");
+  });
+
+  it("parseSignal skips mentions with non-integer offsets", () => {
+    const mentions = [{ start: Number.NaN, length: 1, replacement: "@x" }, { start: 1.5, length: 1, replacement: "@y" }];
+    expect(new SignalFormatConverter().parseSignal("hello", [], mentions).text).toBe("hello");
   });
 
   it("sends an mdast AST with styles", async () => {
@@ -147,12 +153,14 @@ describe("outbound markdown", () => {
     expect(adapter.renderFormatted({ type: "root", children: [{ type: "heading", depth: 2, children: [{ type: "text", value: "Hi" }] }] })).toBe("Hi");
   });
 
-  it("SignalFormatConverter.renderPostable gives the same text as a send, cards included", () => {
+  it("SignalFormatConverter.renderPostable gives the text renderSignal sends, cards included", () => {
     const converter = new SignalFormatConverter();
     const card = Card({ title: "T", children: [CardText("hi **x**")] });
 
+    for (const postable of [card, { markdown: "**b** ||s||" }]) {
+      expect(converter.renderPostable(postable)).toBe(converter.renderSignal(postable).text);
+    }
     expect(converter.renderPostable(card)).toBe("T\n\nhi x");
-    expect(converter.renderPostable({ markdown: "**b** ||s||" })).toBe("b s");
   });
 
   it("echoes a received message's AST back, also after serialisation, without turning typed `||` into a spoiler", async () => {
@@ -212,12 +220,19 @@ describe("outbound cards", () => {
   it("keeps `||` in card data literal; card text, which is markdown, still has spoilers", async () => {
     const card = Card({
       title: "a || b || c",
-      children: [Fields([Field({ label: "x||y||", value: "1 || 2 || 3" })]), CardText("||hidden||")],
+      subtitle: "s||t||",
+      children: [
+        Fields([Field({ label: "x||y||", value: "1 || 2 || 3" })]),
+        CardText("||hidden||"),
+        CardLink({ url: "https://e.com", label: "l||m||" }),
+        Image({ url: "https://e.com/i.png", alt: "i||j||" }),
+        Actions([LinkButton({ url: "https://e.com/b", label: "b||c||" })]),
+      ],
     });
 
     expect(await send(card)).toEqual({
-      message: "a || b || c\n\nx||y||: 1 || 2 || 3\n\nhidden",
-      textStyle: ["0:11:BOLD", "13:6:BOLD", "34:6:SPOILER"],
+      message: "a || b || c\ns||t||\n\nx||y||: 1 || 2 || 3\n\nhidden\n\nl||m|| (https://e.com)\n\ni||j|| (https://e.com/i.png)\n\nb||c|| (https://e.com/b)",
+      textStyle: ["0:11:BOLD", "20:6:BOLD", "41:6:SPOILER"],
     });
   });
 
@@ -313,6 +328,8 @@ describe("inbound text styles", () => {
     ["a style ending inside an emoji takes the whole emoji", "x😀", [{ style: "BOLD", start: 0, length: 2 }], "**x😀**\n"],
     ["monospace keeps its edge spaces", "a  x  b", [{ style: "MONOSPACE", start: 1, length: 5 }], "a`   x   `b\n"],
     ["monospace from mid-line over a line break stays inline", "a b\nc", [{ style: "MONOSPACE", start: 2, length: 3 }], "a `b\nc`\n"],
+    ["whole lines of monospace with a style inside are still a code block", "a\nb\nc", [{ style: "MONOSPACE", start: 0, length: 5 }, { style: "BOLD", start: 2, length: 1 }], "```\na\nb\nc\n```\n"],
+    ["strikethrough nests inside italic", "abc", [{ style: "ITALIC", start: 0, length: 3 }, { style: "STRIKETHROUGH", start: 1, length: 1 }], "*a~~b~~c*\n"],
     ["overlapping monospace ranges make one code span", "a bcd e", [{ style: "MONOSPACE", start: 2, length: 2 }, { style: "MONOSPACE", start: 3, length: 2 }], "a `bcd` e\n"],
     ["bold inside monospace splits the code span around it", "a bcd e", [{ style: "MONOSPACE", start: 2, length: 3 }, { style: "BOLD", start: 3, length: 1 }], "a `b`**`c`**`d` e\n"],
     ["monospace over whole lines ending mid-line stays inline", "a\nb\ncd", [{ style: "MONOSPACE", start: 0, length: 5 }], "`a\nb\nc`d\n"],
@@ -368,7 +385,12 @@ describe("inbound mentions", () => {
       ...envelope,
       dataMessage: {
         ...envelope.dataMessage,
-        mentions: [{ uuid: "not-an-aci", start: 3, length: 1 }, { uuid: BOB_ACI, start: 3, length: 9 }, { uuid: BOB_ACI }],
+        mentions: [
+          { uuid: "not-an-aci", start: 3, length: 1 },
+          { uuid: BOB_ACI, start: 3, length: 9 },
+          { uuid: BOB_ACI, start: 3, length: 0 },
+          { uuid: BOB_ACI },
+        ],
       },
     });
 
