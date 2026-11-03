@@ -1,4 +1,12 @@
-import { AdapterError, AuthenticationError, NetworkError, ResourceNotFoundError, ValidationError } from "@chat-adapter/shared";
+import {
+  AdapterError,
+  AuthenticationError,
+  extractFiles,
+  extractPostableAttachments,
+  NetworkError,
+  ResourceNotFoundError,
+  ValidationError,
+} from "@chat-adapter/shared";
 import {
   defaultEmojiResolver,
   NotImplementedError,
@@ -17,7 +25,7 @@ import {
   type ThreadInfo,
   type UserInfo,
 } from "chat";
-import { attachmentLocator, fetchAttachment, outboundAttachments } from "./attachments.js";
+import { outboundAttachments, withFetchData } from "./attachments.js";
 import {
   parseReaction,
   parseTextMessage,
@@ -303,8 +311,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
 
   /** Gives a received attachment back its `fetchData` (lost when Chat serializes a message), which asks signal-cli for the content. */
   rehydrateAttachment(attachment: Attachment): Attachment {
-    const locator = attachmentLocator(attachment.fetchMetadata);
-    return locator ? { ...attachment, fetchData: () => fetchAttachment(this.transport, this.account, locator) } : attachment;
+    return withFetchData(attachment, this.transport, this.account);
   }
 
   renderFormatted(content: FormattedContent): string {
@@ -467,10 +474,11 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
    */
   private async send(conversation: SignalThreadId, message: AdapterPostableMessage, editTimestamp?: number): Promise<SignalSendResult> {
     const { text, styles } = this.formatConverter.renderSignal(message);
-    const attachments = await outboundAttachments(message);
-    if (editTimestamp !== undefined && attachments.length > 0) {
+    // Checked before encoding: a rejected edit should not base64 a large file first.
+    if (editTimestamp !== undefined && (extractFiles(message).length > 0 || extractPostableAttachments(message).length > 0)) {
       throw new ValidationError(ADAPTER_NAME, "A Signal edit cannot add attachments; post them in a new message");
     }
+    const attachments = await outboundAttachments(message);
     const result = await this.transport.request<SignalSendResult | null>("send", {
       account: this.account,
       ...recipientParams(conversation),

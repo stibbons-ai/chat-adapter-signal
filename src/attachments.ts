@@ -73,8 +73,8 @@ function dataUri(data: Buffer, mimeType: string | undefined, name: string | unde
 
 /**
  * The attachments of a data message received in Conversation `threadId`,
- * without content: `fetchData` comes from `fetchAttachment` (the adapter's
- * `rehydrateAttachment`), which asks signal-cli for it, so it works with
+ * without content: `withFetchData` (the adapter's `rehydrateAttachment`) adds
+ * `fetchData`, which asks signal-cli for it, so it works with
  * signal-cli on another host. Entries without an ID (nothing signal-cli could
  * return) are left out.
  */
@@ -111,18 +111,21 @@ function isCount(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
-/** The locator in an attachment's `fetchMetadata`, or `undefined` for an attachment this adapter did not parse. */
-export function attachmentLocator(metadata: Record<string, string> | undefined): AttachmentLocator | undefined {
-  const id = metadata?.id;
-  const threadId = metadata?.threadId;
-  return typeof id === "string" && id && typeof threadId === "string" ? { id, threadId } : undefined;
+/**
+ * The attachment with `fetchData` rebuilt from its `fetchMetadata`, or unchanged when this adapter did not parse it.
+ * `fetchData` asks signal-cli's `getAttachment` for the content (base64), never reads a local file.
+ */
+export function withFetchData(attachment: Attachment, transport: SignalTransport, account: string): Attachment {
+  const id = attachment.fetchMetadata?.id;
+  const threadId = attachment.fetchMetadata?.threadId;
+  if (typeof id !== "string" || !id || typeof threadId !== "string") {
+    return attachment;
+  }
+  return { ...attachment, fetchData: () => fetchAttachment(transport, account, { id, threadId }) };
 }
 
-/**
- * A received attachment's content, through signal-cli's `getAttachment` (base64),
- * never from a local file. signal-cli wants the sender of a 1:1 message or the Group.
- */
-export async function fetchAttachment(transport: SignalTransport, account: string, { id, threadId }: AttachmentLocator): Promise<Buffer> {
+/** signal-cli wants the sender of a 1:1 message or the Group. */
+async function fetchAttachment(transport: SignalTransport, account: string, { id, threadId }: AttachmentLocator): Promise<Buffer> {
   const conversation = decodeThreadId(threadId);
   const result = await transport.request<{ data?: unknown } | null>("getAttachment", {
     account,

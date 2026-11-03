@@ -88,8 +88,7 @@ export function parseTextMessage(
     return null;
   }
   const attachments = parseAttachments(data.attachments, threadId);
-  const body = typeof data.message === "string" ? data.message : attachments.length > 0 ? "" : null;
-  if (body === null) {
+  if (typeof data.message !== "string" && attachments.length === 0) {
     return null;
   }
   // Before the Bot Account's ACI is known (parseMessage before initialize), a Mention can't be decided.
@@ -115,7 +114,7 @@ export function parseTextMessage(
       styles.push({ style: range.style, start: range.start, length: range.length });
     }
   }
-  const { text, ast } = formatConverter.parseSignal(body, styles, mentions);
+  const { text, ast } = formatConverter.parseSignal(data.message ?? "", styles, mentions);
 
   return new Message<SignalRawMessage>({
     id: encodeMessageId(aci, data.timestamp),
