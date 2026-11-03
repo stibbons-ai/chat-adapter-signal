@@ -68,7 +68,8 @@ export interface SignalAdapterConfig {
   /**
    * How long one request to signal-cli (a send, a lookup, startup's `version`) may take before it
    * fails with a `NetworkError`, on every transport. Default: 60 000 ms. A send with attachments and
-   * an attachment's `fetchData()` get 1 ms more per 64 bytes of base64 content (a 64 kB/s transfer).
+   * an attachment's `fetchData()` get 1 ms more per 64 bytes of base64 content (a 64 kB/s transfer);
+   * `fetchData()` sizes it from the attachment's `size`, and without one allows for 150 MiB.
    */
   requestTimeoutMs?: number;
   /** Backoff for reconnecting a dropped event stream; see {@link ReconnectOptions}. */

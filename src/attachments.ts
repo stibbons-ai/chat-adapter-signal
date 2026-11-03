@@ -145,7 +145,7 @@ export function withFetchData(attachment: Attachment, transport: SignalTransport
  * signal-cli 0.14.9 looks the file up by `id` alone, but its CLI requires the sender of a 1:1
  * message (`recipient`) or the Group (`groupId`) too, so the adapter sends the matching one.
  * The deadline grows with the reply's base64 size. The sender's client reports `size`: an unknown
- * one (absent or 0) or one beyond what signal-cli downloads counts as the largest it downloads.
+ * one (absent, 0 or not a count) or one beyond what signal-cli downloads counts as the largest it downloads.
  */
 async function fetchAttachment(
   transport: SignalTransport,

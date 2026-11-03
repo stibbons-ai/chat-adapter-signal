@@ -76,6 +76,8 @@ export class FakeSignalCli {
   private readonly trickles = new Map<string, { pieces: number; intervalMs: number }>();
   private readonly lineServers: NetServer[] = [];
   private readonly lineConnections = new Set<Socket>();
+  /** The latest reply written (or queued) per line connection; the next one waits for it. */
+  private readonly lineWrites = new WeakMap<Socket, Promise<void>>();
   /** Like signal-cli 0.14.9 `SseEventBuffer`: IDs `<run>-<sequence>`, a fresh `<run>` per daemon run. */
   private eventIdPrefix = `${Date.now()}i${++fakeInstances}-`;
   private nextEventSequence = 1;
@@ -200,7 +202,12 @@ export class FakeSignalCli {
     await next;
     await this.holds.get(message.method);
     const reply = `${JSON.stringify(this.rpcReply(message))}\n`;
-    await this.writeReply(message.method, reply, (piece) => !socket.destroyed && socket.write(piece));
+    // One whole line at a time, like signal-cli's synchronized JsonWriter: a trickled reply delays the next one.
+    const written = (this.lineWrites.get(socket) ?? Promise.resolve()).then(() =>
+      this.writeReply(message.method, reply, (piece) => !socket.destroyed && socket.write(piece)),
+    );
+    this.lineWrites.set(socket, written);
+    await written;
   }
 
   get url(): string {

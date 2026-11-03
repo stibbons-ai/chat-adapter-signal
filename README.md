@@ -442,7 +442,10 @@ with signal-cli on another host or in a container.
   uploaded the files to Signal, so both legs share that allowance. `fetchData()` sizes it from the
   attachment's `size`; without one it allows for 150 MiB (about 55 minutes). A daemon that never answers
   still fails the request with the usual `NetworkError` ("… did not answer within N ms") once the
-  deadline passes. On a slower link, raise `requestTimeoutMs`.
+  deadline passes. On a slower link, raise `requestTimeoutMs`. On spawn, socket and TCP one connection
+  carries every request and reply, so other requests (and a second attachment) wait while a large file
+  crosses it, yet keep their own deadline: on a slow link they can time out meanwhile. The HTTP
+  transport gives each request its own connection.
 
 ## History, users and DMs
 

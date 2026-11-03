@@ -71,7 +71,8 @@ function timeoutError(method: string, deadlineMs: number) {
   });
 }
 
-describe.each(transports)("attachment deadline over the %s transport", (_name, timeoutMs, transportFor) => {
+// The spawn row's deadline alone is 2 s, so its tests get more than vitest's 5 s default.
+describe.each(transports)("attachment deadline over the %s transport", { timeout: 15_000 }, (_name, timeoutMs, transportFor) => {
   async function dmThread(fake: FakeSignalCli) {
     const started = await bot(fake, await transportFor(fake), timeoutMs);
     fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "send me the report" }));
@@ -91,16 +92,21 @@ describe.each(transports)("attachment deadline over the %s transport", (_name, t
     expect(fake.rpcRequests("send")).toHaveLength(1);
   });
 
-  it("fails a send with an attachment that signal-cli never answers once the deadline for its size passes", async () => {
+  it("fails a send with attachments that signal-cli never answers once the deadline for their total size passes", async () => {
     const fake = await startFake();
     const { thread } = await dmThread(fake);
     fake.hold("send"); // never released: a wedged daemon
     const started = Date.now();
+    const files = [
+      { data: Buffer.alloc(rawBytesFor(200), 7), filename: "a.bin" },
+      { data: Buffer.alloc(rawBytesFor(300), 8), filename: "b.bin" },
+    ];
 
-    const error = await thread.post({ markdown: "report", files: [{ data: Buffer.alloc(rawBytesFor(400), 7), filename: "report.bin" }] }).catch((e: unknown) => e);
+    const error = await thread.post({ markdown: "report", files }).catch((e: unknown) => e);
 
-    const [uri] = fake.rpcRequests("send")[0]!.params!.attachments as string[];
-    const deadlineMs = timeoutMs + Math.ceil(uri!.length / BASE64_BYTES_PER_MS);
+    const uris = fake.rpcRequests("send")[0]!.params!.attachments as string[];
+    expect(uris).toHaveLength(2);
+    const deadlineMs = timeoutMs + Math.ceil(uris.reduce((total, uri) => total + uri.length, 0) / BASE64_BYTES_PER_MS);
     expect(error).toEqual(timeoutError("send", deadlineMs));
     expect(Date.now() - started).toBeGreaterThanOrEqual(deadlineMs - 1);
   });
