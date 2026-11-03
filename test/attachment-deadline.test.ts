@@ -1,4 +1,6 @@
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Attachment } from "chat";
@@ -7,6 +9,7 @@ import { withFetchData } from "../src/attachments.js";
 import { requestDeadlineMs } from "../src/errors.js";
 import type { SignalTransportConfig } from "../src/index.js";
 import type { RequestOptions, SignalTransport } from "../src/transport/types.js";
+import { HttpTransport } from "../src/transport/http.js";
 import { ALICE_ACI, attachmentEnvelope, BOT_ACCOUNT, directTextEnvelope, FakeSignalCli } from "./fake-signal-cli.js";
 import { fakeSignalCliOnPath, startBot, type Bot } from "./helpers.js";
 
@@ -163,6 +166,33 @@ it("is not cut short over HTTP by the fetch client's response-headers timeout", 
   });
 
   expect(sent.raw.timestamp).toEqual(expect.any(Number));
+});
+
+it("reports an HTTP reply with a status outside 200-599 as a NetworkError", async () => {
+  // node:http accepts any three-digit status, e.g. from a misbehaving proxy; a Response cannot hold it.
+  const server = createNetServer((socket) => socket.end("HTTP/1.1 600 Weird\r\nContent-Length: 0\r\n\r\n", () => socket.destroy()));
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  cleanups.push(() => new Promise((resolve) => server.close(() => resolve())));
+  const { port } = server.address() as AddressInfo;
+  const transport = new HttpTransport({ type: "http", url: `http://127.0.0.1:${port}` }, BOT_ACCOUNT, REQUEST_TIMEOUT_MS);
+
+  await expect(transport.request("version")).rejects.toThrow(
+    expect.objectContaining({ name: "NetworkError", message: expect.stringMatching(/returned HTTP 600$/) }),
+  );
+});
+
+it.each([
+  [401, {}, { name: "AuthenticationError" }],
+  [429, { "Retry-After": "30" }, { name: "AdapterRateLimitError", retryAfter: 30 }],
+])("maps an HTTP %s on a JSON-RPC request like before", async (status, headers, expected) => {
+  // JSON-RPC goes through node:http, the health check through fetch: this covers the RPC path.
+  const fake = await startFake();
+  fake.httpStatus = status;
+  fake.httpHeaders = headers;
+  const transport = new HttpTransport({ type: "http", url: fake.url }, BOT_ACCOUNT, REQUEST_TIMEOUT_MS);
+
+  await expect(transport.request("version")).rejects.toThrow(expect.objectContaining(expected));
 });
 
 describe("getAttachment deadline", () => {

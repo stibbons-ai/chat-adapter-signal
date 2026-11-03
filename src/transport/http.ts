@@ -225,6 +225,7 @@ export class HttpTransport implements SignalTransport {
    * POSTs JSON with node:http(s), not fetch: undici (behind Node's fetch) fails a request whose
    * response headers take over 300 s (`headersTimeout`), and signal-cli answers a `send` only after
    * it uploaded the attachments to Signal. Only `signal` (the request's deadline) bounds this one.
+   * Unlike fetch it follows no redirects and ignores a global undici dispatcher; signal-cli needs neither.
    */
   private post(path: string, body: string, signal: AbortSignal, what: string): Promise<Response> {
     return new Promise((resolve, reject) => {
@@ -237,11 +238,18 @@ export class HttpTransport implements SignalTransport {
           const status = incoming.statusCode!;
           // Statuses that carry no body: a Response with one would throw.
           const nullBody = status === 204 || status === 205 || status === 304;
+          try {
+            const content = nullBody ? null : (Readable.toWeb(incoming) as ReadableStream<Uint8Array>);
+            resolve(new Response(content, { status, headers: responseHeaders(incoming.headers) }));
+          } catch (error) {
+            // A status outside 200-599 (a misbehaving proxy): Response refuses it, fetch reported it as non-2xx.
+            incoming.destroy();
+            reject(new NetworkError(ADAPTER_NAME, `signal-cli ${what} at ${this.endpoint} returned HTTP ${status}`, error as Error));
+            return;
+          }
           if (nullBody) {
             incoming.resume();
           }
-          const content = nullBody ? null : (Readable.toWeb(incoming) as ReadableStream<Uint8Array>);
-          resolve(new Response(content, { status, headers: responseHeaders(incoming.headers) }));
         });
         request.on("error", fail);
         request.end(body);
