@@ -103,11 +103,12 @@ export class LineTransport implements SignalTransport {
       }
       case "socket":
         this.endpoint = `unix:${options.path}`;
-        this.open = () => connectSocket(createConnection({ path: options.path }), this.endpoint);
+        this.open = () => connectSocket(createConnection({ path: options.path }), this.endpoint, requestTimeoutMs);
         break;
       case "tcp":
         this.endpoint = `tcp://${options.host}:${options.port}`;
-        this.open = () => connectSocket(createConnection({ host: options.host, port: options.port }), this.endpoint);
+        this.open = () =>
+          connectSocket(createConnection({ host: options.host, port: options.port }), this.endpoint, requestTimeoutMs);
         break;
     }
   }
@@ -147,8 +148,8 @@ export class LineTransport implements SignalTransport {
     const { signal } = options;
     signal?.throwIfAborted();
     this.early ??= [];
-    // ponytail: an abort stops waiting for the connect, not the connect itself; `close()` still
-    // awaits it, which for a TCP host that never answers is the OS connect timeout.
+    // An abort stops waiting for the connect, not the connect itself; `close()` still awaits it,
+    // at most `requestTimeoutMs` (a TCP host that never answers).
     await abortable(this.connect(), signal);
     // Its own identity, so closing an older subscription of the same listener (a reconnect) leaves this one alone.
     const own: EventListener = {
@@ -344,9 +345,10 @@ function validate(options: LineTransportOptions): void {
   }
 }
 
-async function connectSocket(socket: Socket, endpoint: string): Promise<Connection> {
+/** Gives up after `timeoutMs`: a TCP host that drops SYNs would otherwise hold it for the OS connect timeout. */
+async function connectSocket(socket: Socket, endpoint: string, timeoutMs: number): Promise<Connection> {
   try {
-    await once(socket, "connect");
+    await once(socket, "connect", { signal: AbortSignal.timeout(timeoutMs) });
   } catch (error) {
     socket.destroy();
     throw unreachable(`connecting to ${endpoint}`, error);

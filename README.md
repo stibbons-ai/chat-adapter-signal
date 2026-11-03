@@ -51,7 +51,7 @@ await chat.initialize();
 | `userName` | – | Defaults to the `Chat` instance's `userName`. |
 | `logger` | – | Defaults to the `Chat` instance's logger. |
 | `drainTimeoutMs` | – | How long `disconnect()` waits for running handlers and the final receive-cursor write. Default 10 000. |
-| `requestTimeoutMs` | – | How long one request to signal-cli (a send, a lookup, the startup checks) may take before it fails with a `NetworkError`, on every transport. Default 60 000. On spawn it includes signal-cli's own startup, which takes seconds. A reply that arrives later is dropped. |
+| `requestTimeoutMs` | – | How long one request to signal-cli (a send, a lookup, the startup checks) may take before it fails with a `NetworkError`, on every transport. Default 60 000. It also bounds connecting to a socket or TCP daemon. On spawn it includes signal-cli's own startup, which takes seconds. A reply that arrives later is dropped. |
 | `reconnect` | – | `{ minDelayMs?, maxDelayMs? }` backoff for reconnecting a dropped event stream; see below. |
 
 ### Transports

@@ -1,14 +1,19 @@
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSignalAdapter, type SignalTransportConfig } from "../src/index.js";
+import { HttpTransport } from "../src/transport/http.js";
 import { LineTransport } from "../src/transport/line.js";
 import { ALICE_ACI, BOT_ACCOUNT, directTextEnvelope, FakeSignalCli } from "./fake-signal-cli.js";
 import { fakeSignalCliOnPath, startBot, type Bot } from "./helpers.js";
 
-// Real deadlines: the adapter talks to a real fake daemon, so fake timers are not an option.
-const REQUEST_TIMEOUT_MS = 100;
+// Real deadlines: the adapter talks to a real fake daemon, so fake timers are not an option. The
+// deadline also bounds the setup requests, so it keeps a margin for a loaded CI machine.
+const REQUEST_TIMEOUT_MS = 250;
 /** The deadline includes starting the spawned process (the fake executable is a Node script), so it gets longer. */
 const SPAWN_REQUEST_TIMEOUT_MS = 2_000;
 
@@ -93,6 +98,9 @@ describe.each(transports)("request deadline over the %s transport", (_name, time
 
     await expect(chat.initialize()).rejects.toThrow(timeoutError("version", timeoutMs));
     expect(fake.rpcRequests("version")).toHaveLength(1);
+    // The failed startup released the socket or terminated the spawned signal-cli.
+    await fake.lineConnectionsClosed();
+    expect(fake.openLineConnections).toBe(0);
   });
 });
 
@@ -107,6 +115,23 @@ it("fails initialize() when the HTTP health check is never answered", async () =
       message: `signal-cli health check at ${fake.url} did not answer within ${REQUEST_TIMEOUT_MS} ms`,
     }),
   );
+});
+
+it("fails an HTTP reply whose body stalls after the headers", async () => {
+  const server = createServer((request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.write('{"jsonrpc":"2.0",'); // and never the rest
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  cleanups.push(async () => {
+    server.closeAllConnections();
+    server.close();
+  });
+  const { port } = server.address() as AddressInfo;
+  const transport = new HttpTransport({ type: "http", url: `http://127.0.0.1:${port}` }, BOT_ACCOUNT, REQUEST_TIMEOUT_MS);
+
+  await expect(transport.request("version")).rejects.toThrow(timeoutError("version"));
 });
 
 describe("a timed-out request on a line transport", () => {
@@ -128,6 +153,26 @@ describe("a timed-out request on a line transport", () => {
     releaseGroups();
 
     await expect(groups).resolves.toEqual(fake.groups);
+    expect(pendingRequests(transport)).toBe(0);
+  });
+
+  it("is never sent when its connect finishes after the deadline", async () => {
+    const fake = await startFake();
+    const port = await fake.listenTcp();
+    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port }, BOT_ACCOUNT, REQUEST_TIMEOUT_MS);
+    cleanups.push(() => transport.close());
+    const open = Reflect.get(transport, "open") as () => Promise<unknown>;
+    let finishConnect!: () => void;
+    const connectGate = new Promise<void>((resolve) => {
+      finishConnect = resolve;
+    });
+    Object.assign(transport, { open: () => connectGate.then(open) });
+
+    await expect(transport.request("send", { message: "late" })).rejects.toThrow(timeoutError("send"));
+    finishConnect();
+
+    await expect(transport.request("version")).resolves.toEqual({ version: fake.version });
+    expect(fake.rpcRequests("send")).toEqual([]);
     expect(pendingRequests(transport)).toBe(0);
   });
 });
