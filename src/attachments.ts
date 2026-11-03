@@ -21,6 +21,11 @@ type AttachmentLocator = { id: string; threadId: string };
 
 const DEFAULT_MIME_TYPE = "application/octet-stream";
 
+/** Whether an outgoing message carries files or attachments. */
+export function hasAttachments(message: AdapterPostableMessage): boolean {
+  return extractFiles(message).length > 0 || extractPostableAttachments(message).length > 0;
+}
+
 /**
  * The files and attachments of an outgoing message as RFC 2397 data URIs, the
  * form signal-cli's `send` takes them in from a remote Host App:

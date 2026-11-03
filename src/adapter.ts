@@ -1,12 +1,4 @@
-import {
-  AdapterError,
-  AuthenticationError,
-  extractFiles,
-  extractPostableAttachments,
-  NetworkError,
-  ResourceNotFoundError,
-  ValidationError,
-} from "@chat-adapter/shared";
+import { AdapterError, AuthenticationError, NetworkError, ResourceNotFoundError, ValidationError } from "@chat-adapter/shared";
 import {
   defaultEmojiResolver,
   NotImplementedError,
@@ -25,7 +17,7 @@ import {
   type ThreadInfo,
   type UserInfo,
 } from "chat";
-import { outboundAttachments, withFetchData } from "./attachments.js";
+import { hasAttachments, outboundAttachments, withFetchData } from "./attachments.js";
 import {
   parseReaction,
   parseTextMessage,
@@ -475,7 +467,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   private async send(conversation: SignalThreadId, message: AdapterPostableMessage, editTimestamp?: number): Promise<SignalSendResult> {
     const { text, styles } = this.formatConverter.renderSignal(message);
     // Checked before encoding: a rejected edit should not base64 a large file first.
-    if (editTimestamp !== undefined && (extractFiles(message).length > 0 || extractPostableAttachments(message).length > 0)) {
+    if (editTimestamp !== undefined && hasAttachments(message)) {
       throw new ValidationError(ADAPTER_NAME, "A Signal edit cannot add attachments; post them in a new message");
     }
     const attachments = await outboundAttachments(message);
