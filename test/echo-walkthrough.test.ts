@@ -172,6 +172,62 @@ it("formatting bot: a styled message comes in as markdown and goes back out with
 });
 
 /**
+ * Walkthrough for a bot developer streaming an AI answer: a Group member
+ * mentions the bot, the handler shows typing and posts an AI SDK `fullStream`,
+ * and signal-cli is asked for the typing indicator and then exactly one
+ * message with the whole answer (no draft, no edit), which Chat records once.
+ */
+it("AI bot: a streamed answer arrives as one message after the typing indicator", async () => {
+  const signalCli = await FakeSignalCli.start();
+  const groupId = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+  const chat = new Chat({
+    userName: "echo-bot",
+    adapters: {
+      signal: createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: signalCli.url } }),
+    },
+    state: createMemoryState(),
+    concurrency: "queue",
+    logger: "silent",
+  });
+  const answered: string[] = [];
+  chat.onNewMention(async (thread) => {
+    await thread.startTyping();
+    // The shape of AI SDK's `streamText(...).fullStream`: text deltas, tool events, steps.
+    async function* fullStream() {
+      yield { type: "text-delta", text: "It is " };
+      yield { type: "tool-call", toolName: "weather" };
+      yield { type: "text-delta", text: "**sunny**." };
+      yield { type: "finish-step" };
+      yield { type: "text-delta", text: "Enjoy!" };
+    }
+    const sent = await thread.post(fullStream());
+    answered.push(sent.id);
+  });
+  await chat.initialize();
+  cleanup = async () => {
+    await chat.shutdown();
+    await signalCli.stop();
+  };
+
+  signalCli.injectEnvelope(groupTextEnvelope({ aci: ALICE_ACI, groupId, text: "￼ weather?", mentions: [{ aci: BOT_ACI, start: 0 }] }));
+  await expect.poll(() => answered.length).toBe(1);
+
+  const outbound = signalCli
+    .rpcRequests()
+    .filter((request) => request.method.startsWith("send"))
+    .map((request) => [request.method, request.params]);
+  expect(outbound).toEqual([
+    ["sendTyping", { account: BOT_ACCOUNT, groupId }],
+    ["send", { account: BOT_ACCOUNT, groupId, message: "It is sunny.\n\nEnjoy!", textStyle: ["6:5:BOLD"] }],
+  ]);
+  const threadId = chat.getAdapter("signal").encodeThreadId({ type: "group", groupId });
+  const history = await chat.getAdapter("signal").fetchMessages(threadId);
+  expect(history.messages.filter((message) => message.author.isMe).map((message) => [message.id, message.text])).toEqual([
+    [answered[0], "It is sunny.\n\nEnjoy!"],
+  ]);
+});
+
+/**
  * Walkthrough for a bot operator: the echo bot keeps answering through a
  * network drop, a signal-cli restart, and a Host App restart (same state store,
  * as Redis would be), and every message is answered exactly once. Read back
