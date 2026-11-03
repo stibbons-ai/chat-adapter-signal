@@ -164,6 +164,34 @@ U+FFFC in `message.text` for now.
 Not user input, so never handed to Chat: sync messages from the Bot Account's own linked devices,
 edits, remote deletes, reactions, receipts, typing indicators, story replies, and legacy-group messages.
 
+## History, users and DMs
+
+Signal keeps no history on a server, so the adapter sets `persistThreadHistory` and Chat records
+each Conversation in its state adapter: every message it hands to a handler and every
+`thread.post`. `fetchMessages` (and so `thread.messages`, `thread.allMessages`, `chat.history.thread`)
+returns that record, oldest first, paged by message ID: what the bot saw since it started, within
+Chat's `history.thread` limits (default 100 messages per Conversation, 7 days). Recorded messages have
+`raw: null`, and the bot's own posts carry Chat's `author.userId: "self"` with `isMe: true`.
+The record is keyed by thread ID only, so give each Bot Account its own state store.
+
+`fetchThread` names a 1:1 Conversation after the user (`metadata.aci`) and a Group after its
+Signal name (`metadata.groupId`, `description`, `members` as ACIs); a Group the Bot Account is not
+in throws `ResourceNotFoundError`. `getUser(aci)` returns `userId` and `userName` as the ACI and
+`fullName` as signal-cli names the sender in messages (nickname, contact name, profile name,
+then phone number), or `null` for an unknown ACI.
+
+`adapter.openDM(user)` takes an ACI, a phone number (`+15550001111`) or `u:<username>` and returns
+`signal:dm:<ACI>`; signal-cli looks numbers and usernames up on the Signal server, and a user it
+finds no ACI for (unknown, or a number its owner hides) throws `ResourceNotFoundError`. Chat's own
+`chat.openDM(...)` and `chat.getUser(...)` cannot tell a Signal ID from another platform's, so call
+the adapter and open the thread yourself:
+
+```ts
+const signal = chat.getAdapter("signal");
+const thread = chat.thread(await signal.openDM("+15550001111"));
+await thread.post("Hello!");
+```
+
 ## Errors
 
 signal-cli failures surface as `@chat-adapter/shared` errors (signal-cli JSON-RPC codes in parentheses):

@@ -1,16 +1,19 @@
-import { AdapterError, AuthenticationError, NetworkError, ValidationError } from "@chat-adapter/shared";
+import { AdapterError, AuthenticationError, NetworkError, ResourceNotFoundError, ValidationError } from "@chat-adapter/shared";
 import {
   NotImplementedError,
   type Adapter,
   type AdapterPostableMessage,
   type ChatInstance,
   type EmojiValue,
+  type FetchOptions,
   type FetchResult,
   type FormattedContent,
   type Logger,
   type Message,
   type RawMessage,
+  ThreadHistoryCache,
   type ThreadInfo,
+  type UserInfo,
 } from "chat";
 import {
   parseTextMessage,
@@ -18,8 +21,10 @@ import {
   type SignalRawMessage,
   type SignalSendResult,
 } from "./envelope.js";
+import { contactDisplayName, findContact, findGroup } from "./directory.js";
 import { ADAPTER_NAME, assertTimeoutMs, malformedResponse } from "./errors.js";
 import { SignalFormatConverter } from "./format.js";
+import { historyPage } from "./history.js";
 import { ReceiveLoop, reconnectOptions, type ReconnectOptions } from "./receive-loop.js";
 import { HttpTransport, type HttpTransportOptions } from "./transport/http.js";
 import { LineTransport, type LineTransportOptions } from "./transport/line.js";
@@ -63,6 +68,8 @@ interface SignalAccount {
 
 export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> {
   readonly name = ADAPTER_NAME;
+  /** Signal has no server-side history: Chat records every message in its state adapter instead (`fetchMessages`). */
+  readonly persistThreadHistory = true;
 
   private readonly account: string;
   private readonly transport: SignalTransport;
@@ -219,9 +226,60 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     return decodeThreadId(threadId).type === "dm";
   }
 
+  /** DM: the user's ACI and the name Signal shows for them. Group: its name, description and member ACIs. */
   async fetchThread(threadId: string): Promise<ThreadInfo> {
-    const { type } = decodeThreadId(threadId);
-    return { id: threadId, channelId: threadId, isDM: type === "dm", metadata: {} };
+    const conversation = decodeThreadId(threadId);
+    if (conversation.type === "dm") {
+      const contact = await findContact(this.transport, this.account, conversation.aci);
+      return {
+        id: threadId,
+        channelId: threadId,
+        isDM: true,
+        channelName: contact ? contactDisplayName(contact) : conversation.aci,
+        metadata: { aci: conversation.aci },
+      };
+    }
+    const group = await findGroup(this.transport, this.account, conversation.groupId);
+    if (!group) {
+      throw new ResourceNotFoundError(ADAPTER_NAME, "group", conversation.groupId);
+    }
+    return {
+      id: threadId,
+      channelId: threadId,
+      isDM: false,
+      ...(group.name ? { channelName: group.name } : {}),
+      metadata: {
+        groupId: conversation.groupId,
+        description: group.description ?? undefined,
+        members: (group.members ?? []).flatMap((member) => (isAci(member?.uuid) ? [member.uuid] : [])),
+      },
+    };
+  }
+
+  /** Looks a user up by ACI; `userName` is the ACI, as on message authors. `null` when signal-cli knows no such user. */
+  async getUser(userId: string): Promise<UserInfo | null> {
+    const aci = normalizeAci(userId);
+    if (!aci) {
+      throw new ValidationError(ADAPTER_NAME, `Invalid Signal user ID ${JSON.stringify(userId)}; expected an ACI`);
+    }
+    const contact = await findContact(this.transport, this.account, aci);
+    if (contact?.uuid !== aci) {
+      return null;
+    }
+    return { userId: aci, userName: aci, fullName: contactDisplayName(contact), isBot: aci === this._botUserId };
+  }
+
+  /**
+   * The 1:1 Conversation with a user given by ACI, phone number, or `u:<username>`.
+   * An ACI needs no lookup; signal-cli resolves the others, asking the Signal server
+   * for ones it has not seen. A number whose owner hides it from lookup has no ACI to find.
+   */
+  async openDM(userId: string): Promise<string> {
+    const aci = normalizeAci(userId) ?? (await findContact(this.transport, this.account, userId))?.uuid;
+    if (!aci) {
+      throw new ResourceNotFoundError(ADAPTER_NAME, "user", userId);
+    }
+    return encodeThreadId({ type: "dm", aci });
   }
 
   parseMessage(raw: SignalRawMessage): Message<SignalRawMessage> {
@@ -270,8 +328,20 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     throw new NotImplementedError("The Signal adapter does not support typing indicators yet", "startTyping");
   }
 
-  async fetchMessages(): Promise<FetchResult<SignalRawMessage>> {
-    throw new NotImplementedError("The Signal adapter does not support fetching messages yet", "fetchMessages");
+  /**
+   * The history Chat recorded for this Conversation (`persistThreadHistory`): messages
+   * received and posted through Chat since the bot started, up to Chat's
+   * `history.thread` limits (default 100 messages, 7 days); `raw` is `null` on them.
+   */
+  async fetchMessages(threadId: string, options: FetchOptions = {}): Promise<FetchResult<SignalRawMessage>> {
+    decodeThreadId(threadId);
+    if (!this.chat) {
+      throw new ValidationError(ADAPTER_NAME, "The Signal adapter is not initialized; call chat.initialize() first");
+    }
+    const history = new ThreadHistoryCache(this.chat.getState());
+    // Chat stores every message of this thread ID, all from this adapter; it nulls their `raw`.
+    const messages = (await history.getMessages(threadId)) as Message<SignalRawMessage>[];
+    return historyPage(messages, options);
   }
 
   private async checkVersion(): Promise<void> {

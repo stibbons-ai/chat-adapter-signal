@@ -43,6 +43,13 @@ export class FakeSignalCli {
   readonly requests: RecordedRequest[] = [];
   version = "0.14.9";
   accounts: Array<{ number: string | null; aci: string | null }> = [{ number: BOT_ACCOUNT, aci: BOT_ACI }];
+  /**
+   * Other Signal users the fake can resolve, as `listContacts` entries (`JsonContact`; `uuid` is the ACI,
+   * null when only a PNI is known). Found by number, ACI or `u:<username>`, like signal-cli's server lookups.
+   */
+  contacts: Array<Record<string, unknown> & { number: string | null; uuid: string | null; username: string | null }> = [];
+  /** Groups the Bot Account is in, as `listGroups` entries (`JsonGroup`; `id` in standard base64). */
+  groups: Array<Record<string, unknown> & { id: string }> = [];
   /** Status for `/api/v1/check` and every other endpoint, e.g. 401 to act like an auth proxy. */
   httpStatus = 200;
   /** Response headers sent with a non-200 `httpStatus`, e.g. `Retry-After`. */
@@ -79,9 +86,17 @@ export class FakeSignalCli {
     // signal-cli 0.14.9 ListContactsCommand JSON output: the ACI is `uuid`.
     this.rpcHandlers.set("listContacts", (params) => {
       const wanted = (params?.recipient as string[] | undefined) ?? [];
-      return this.accounts
-        .filter((entry) => wanted.includes(entry.number ?? "") || wanted.includes(entry.aci ?? ""))
-        .map((entry) => ({ number: entry.number, uuid: entry.aci, username: null, name: "" }));
+      const own = this.accounts.map((entry) => ({ number: entry.number, uuid: entry.aci, username: null, name: "" }));
+      return [...own, ...this.contacts].filter(
+        (entry) =>
+          wanted.includes(entry.number ?? "") ||
+          wanted.includes(entry.uuid ?? "") ||
+          (entry.username !== null && wanted.includes(`u:${entry.username}`)),
+      );
+    });
+    this.rpcHandlers.set("listGroups", (params) => {
+      const wanted = params?.groupId as string[] | undefined;
+      return this.groups.filter((group) => !wanted || wanted.includes(group.id));
     });
     this.rpcHandlers.set("send", () => ({
       timestamp: this.nextSendTimestamp++,
