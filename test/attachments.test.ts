@@ -123,13 +123,22 @@ describe("outbound attachments", () => {
     expect(started.fake.rpcRequests("send")).toEqual([]);
   });
 
-  it("rejects an edit that carries files: Signal edits change only the text", async () => {
+  it.each([
+    ["files", { markdown: "fixed", files: [{ data: PNG, filename: "a.png" }] }],
+    ["attachments", { markdown: "fixed", attachments: [{ type: "image" as const, data: PNG, mimeType: "image/png" }] }],
+  ])("rejects an edit that carries %s: Signal edits change only the text", async (_case, message) => {
     const started = await bot();
 
-    await expect(
-      started.adapter.editMessage(ALICE_DM, `${BOT_ACI}:1700000000555`, { markdown: "fixed", files: [{ data: PNG, filename: "a.png" }] }),
-    ).rejects.toBeInstanceOf(ValidationError);
+    await expect(started.adapter.editMessage(ALICE_DM, `${BOT_ACI}:1700000000555`, message)).rejects.toBeInstanceOf(ValidationError);
     expect(started.fake.rpcRequests("send")).toEqual([]);
+  });
+
+  it("sends a file with an empty MIME type as application/octet-stream", async () => {
+    const started = await bot();
+
+    await started.adapter.postMessage(ALICE_DM, { raw: "", files: [{ data: PNG, filename: "a.bin", mimeType: "" }] });
+
+    expect(sentAttachments(started).map(readAsSignalCli)).toEqual([{ mediaType: "application/octet-stream", filename: "a.bin", data: PNG }]);
   });
 });
 
@@ -192,6 +201,27 @@ describe("inbound attachments", () => {
     expect(started.fake.rpcRequests("getAttachment")[0]?.params).toEqual({ account: BOT_ACCOUNT, id: "voice.aac", groupId: GROUP_ID });
   });
 
+  it("normalizes the sender's MIME type and drops invalid metadata", async () => {
+    const started = await bot();
+
+    const message = started.adapter.parseMessage(
+      attachmentEnvelope({
+        aci: ALICE_ACI,
+        attachments: [
+          { id: "a", contentType: "IMAGE/JPEG; quality=high", size: -1, width: 0, height: 0 },
+          { id: "b", contentType: "not a type", size: 1.5, width: 12.5, height: -3 },
+          { id: "c", contentType: "", size: 0 },
+        ],
+      }),
+    );
+
+    expect(message.attachments.map(({ fetchMetadata: _, fetchData: __, ...attachment }) => attachment)).toEqual([
+      { type: "image", mimeType: "image/jpeg" },
+      { type: "file" },
+      { type: "file", size: 0 },
+    ]);
+  });
+
   it("rejects fetching an attachment signal-cli did not download with ResourceNotFoundError", async () => {
     const started = await bot();
 
@@ -229,6 +259,7 @@ describe("inbound attachments", () => {
     const attachment = stored?.attachments[0];
     expect(attachment).toMatchObject({ type: "image", name: "kept.png", mimeType: "image/png" });
     expect(Buffer.from((await attachment!.fetchData!()) as Buffer)).toEqual(PNG);
+    expect(started.fake.rpcRequests("getAttachment")).toHaveLength(1);
   });
 
   it("rebuilds fetchData for a serialized attachment", async () => {

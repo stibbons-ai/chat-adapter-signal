@@ -5,11 +5,14 @@ import { ADAPTER_NAME, malformedResponse } from "./errors.js";
 import type { SignalTransport } from "./transport/types.js";
 import { decodeThreadId } from "./thread-id.js";
 
-/** An entry of a receive envelope's `dataMessage.attachments` (`JsonAttachment` in signal-cli 0.14.9). */
+/** The fields this adapter reads of a receive envelope's `dataMessage.attachments` entry (`JsonAttachment` in signal-cli 0.14.9). */
 export interface SignalAttachment {
   contentType?: unknown;
   filename?: unknown;
-  /** Name of the downloaded file in signal-cli's attachment store; what `getAttachment` takes as `id`. */
+  /**
+   * Opaque ID that `getAttachment` takes. Present even when signal-cli stored no file
+   * (`--ignore-attachments`, a failed download); fetching then fails.
+   */
   id?: unknown;
   size?: unknown;
   width?: unknown;
@@ -37,7 +40,7 @@ export async function outboundAttachments(message: AdapterPostableMessage): Prom
     ...extractFiles(message).map((file) => ({ data: file.data, name: file.filename, mimeType: file.mimeType })),
     ...extractPostableAttachments(message).map((attachment) => {
       if (attachment.data === undefined) {
-        throw new ValidationError(ADAPTER_NAME, "A Signal attachment needs `data`; signal-cli cannot fetch a URL");
+        throw new ValidationError(ADAPTER_NAME, "A Signal attachment needs its `data`: the adapter sends content, not URLs or fetchers");
       }
       return { data: attachment.data, name: attachment.name, mimeType: attachment.mimeType };
     }),
@@ -91,13 +94,13 @@ export function parseAttachments(attachments: unknown, threadId: string): Attach
     if (typeof entry?.id !== "string" || !entry.id) {
       return [];
     }
-    const mimeType = typeof entry.contentType === "string" && entry.contentType ? entry.contentType : undefined;
+    const mime = parseMimeType(entry.contentType);
     const fetchMetadata: AttachmentLocator = { id: entry.id, threadId };
     return [
       {
-        type: attachmentType(mimeType),
+        type: mime?.type === "image" || mime?.type === "video" || mime?.type === "audio" ? mime.type : "file",
         ...(typeof entry.filename === "string" && entry.filename ? { name: entry.filename } : {}),
-        ...(mimeType ? { mimeType } : {}),
+        ...(mime ? { mimeType: mime.essence } : {}),
         ...(isCount(entry.size) ? { size: entry.size } : {}),
         ...(isCount(entry.width) && entry.width > 0 ? { width: entry.width } : {}),
         ...(isCount(entry.height) && entry.height > 0 ? { height: entry.height } : {}),
@@ -107,9 +110,16 @@ export function parseAttachments(attachments: unknown, threadId: string): Attach
   });
 }
 
-function attachmentType(mimeType: string | undefined): Attachment["type"] {
-  const kind = mimeType?.split("/", 1)[0]?.toLowerCase();
-  return kind === "image" || kind === "video" || kind === "audio" ? kind : "file";
+/** The sender's client chose the content type; anything that is not a valid MIME type is dropped. */
+function parseMimeType(contentType: unknown): MIMEType | undefined {
+  if (typeof contentType !== "string") {
+    return undefined;
+  }
+  try {
+    return new MIMEType(contentType);
+  } catch {
+    return undefined;
+  }
 }
 
 function isCount(value: unknown): value is number {
@@ -129,7 +139,10 @@ export function withFetchData(attachment: Attachment, transport: SignalTransport
   return { ...attachment, fetchData: () => fetchAttachment(transport, account, { id, threadId }) };
 }
 
-/** signal-cli wants the sender of a 1:1 message or the Group. */
+/**
+ * signal-cli 0.14.9 looks the file up by `id` alone, but its CLI requires the sender of a 1:1
+ * message (`recipient`) or the Group (`groupId`) too, so the adapter sends the matching one.
+ */
 async function fetchAttachment(transport: SignalTransport, account: string, { id, threadId }: AttachmentLocator): Promise<Buffer> {
   const conversation = decodeThreadId(threadId);
   const result = await transport.request<{ data?: unknown } | null>("getAttachment", {

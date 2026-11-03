@@ -25,7 +25,7 @@ export interface SignalEnvelope {
     textStyles?: Array<{ style?: unknown; start?: unknown; length?: unknown } | null> | null;
     /** The message this one quote-replies to; `authorUuid` is its author's ACI. */
     quote?: { authorUuid?: unknown } | null;
-    /** Files sent with the message, already downloaded into signal-cli's attachment store. */
+    /** Files sent with the message; signal-cli downloads them into its attachment store unless run with `--ignore-attachments`. */
     attachments?: Array<SignalAttachment | null> | null;
     /** A view-once message; the adapter ignores these (out of scope). */
     viewOnce?: unknown;

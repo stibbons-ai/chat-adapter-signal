@@ -222,14 +222,15 @@ with signal-cli on another host or in a container.
 
 - Outgoing: `files` (and postable `attachments` that carry `data`) are sent as RFC 2397 data URIs,
   `data:<MIME type>;filename=<name>;base64,<data>`; a file without `mimeType` goes as
-  `application/octet-stream`. URL-only attachments, empty files, and files on an edit are a
-  `ValidationError`.
-- Incoming: `message.attachments` carry `type` (image, video, audio or file), `name`, `mimeType`, `size`
-  and image dimensions; `fetchData()` asks signal-cli for the content (`getAttachment`). signal-cli
-  must download attachments on receive (the default; not with `--ignore-attachments`), else
-  `fetchData()` rejects with `ResourceNotFoundError`. Messages read back through `fetchMessages` can still fetch.
-  View-once messages are ignored.
-- Both ways the whole file is one base64 JSON-RPC message, held in memory (signal-cli 0.14.9 takes attachments up to 150 MiB).
+  `application/octet-stream`. URL-only attachments, empty files, and files or attachments on an edit
+  are a `ValidationError`.
+- Incoming: `message.attachments` carry `type` (image, video, audio or file), `name`, `mimeType` (an invalid
+  one is dropped), `size` and image dimensions; `fetchData()` asks signal-cli for the content
+  (`getAttachment`). signal-cli must have the file (it downloads attachments on receive unless run
+  with `--ignore-attachments`), else `fetchData()` rejects with `ResourceNotFoundError`. Attachments
+  of messages read back through `fetchMessages` can still fetch their content. View-once messages are ignored.
+- Both ways the whole file is one base64 JSON-RPC message, held in memory (signal-cli 0.14.9 refuses
+  attachments over 150 MiB).
 
 ## History, users and DMs
 
