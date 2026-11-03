@@ -26,16 +26,15 @@ afterEach(async () => {
   }
 });
 
-async function bot(): Promise<Bot> {
-  const started = await startBot();
+async function bot(options?: Parameters<typeof startBot>[0]): Promise<Bot> {
+  const started = await startBot(options);
   bots.push(started);
   return started;
 }
 
 /** A bot whose catch-all `onReaction` records every reaction event Chat delivers. */
 async function reactionBot() {
-  const started = await startBot({ initialize: false });
-  bots.push(started);
+  const started = await bot({ initialize: false });
   const reactions: ReactionEvent[] = [];
   started.chat.onReaction(async (event) => {
     reactions.push(event);
@@ -226,8 +225,7 @@ describe("inbound reactions", () => {
   });
 
   it("match emoji filters by name, including Signal's heart with a variation selector", async () => {
-    const started = await startBot({ initialize: false });
-    bots.push(started);
+    const started = await bot({ initialize: false });
     const hearts: string[] = [];
     started.chat.onReaction([emoji.heart], async (event) => {
       hearts.push(event.rawEmoji);
@@ -268,8 +266,7 @@ describe("inbound reactions", () => {
   });
 
   it("are not handed to message handlers", async () => {
-    const started = await startBot({ initialize: false });
-    bots.push(started);
+    const started = await bot({ initialize: false });
     const messages: Message[] = [];
     started.chat.onDirectMessage(async (_thread: Thread, message: Message) => {
       messages.push(message);
@@ -286,8 +283,7 @@ describe("inbound reactions", () => {
 
 describe("markAsRead", () => {
   it("sends a read receipt to the author of the message being handled, in a 1:1 Conversation and in a Group", async () => {
-    const started = await startBot({ initialize: false });
-    bots.push(started);
+    const started = await bot({ initialize: false });
     const read: string[] = [];
     const markRead = async (thread: Thread, message: Message) => {
       await thread.markAsRead();
@@ -318,8 +314,7 @@ describe("markAsRead", () => {
  * signal-cli everything the bot sent, in order.
  */
 it("deploy bot: read receipt, reactions, edit and retract, driven by a user's messages and reactions", async () => {
-  const started = await startBot({ initialize: false });
-  bots.push(started);
+  const started = await bot({ initialize: false });
   const { chat, fake } = started;
   const signal = chat.getAdapter("signal");
   let statusId = "";

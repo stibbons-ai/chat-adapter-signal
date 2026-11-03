@@ -250,7 +250,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   /** Edits one of the Bot Account's own messages; its ID stays that of the original message, which later edits target. */
   async editMessage(threadId: string, messageId: string, message: AdapterPostableMessage): Promise<RawMessage<SignalRawMessage>> {
     const { conversation, timestamp } = this.ownMessage(threadId, messageId, "edit");
-    const result = await this.send(conversation, message, { editTimestamp: timestamp });
+    const result = await this.send(conversation, message, timestamp);
     return { id: messageId, threadId, raw: result };
   }
 
@@ -356,16 +356,12 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   /** Sends a message (or, with `editTimestamp`, an edit) and returns signal-cli's result with the sent timestamp. */
-  private async send(
-    conversation: SignalThreadId,
-    message: AdapterPostableMessage,
-    extra: { editTimestamp?: number } = {},
-  ): Promise<SignalSendResult> {
+  private async send(conversation: SignalThreadId, message: AdapterPostableMessage, editTimestamp?: number): Promise<SignalSendResult> {
     const result = await this.transport.request<SignalSendResult | null>("send", {
       account: this.account,
       ...recipientParams(conversation),
       message: this.formatConverter.renderPostable(message),
-      ...extra,
+      ...(editTimestamp === undefined ? {} : { editTimestamp }),
     });
     if (!(result && Number.isSafeInteger(result.timestamp))) {
       throw new NetworkError(ADAPTER_NAME, "signal-cli send returned no message timestamp");
@@ -429,20 +425,19 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       return;
     }
     const message = envelope && parseTextMessage(envelope, this.formatConverter, this._botUserId);
-    const reaction = !message && envelope ? parseReaction(envelope, this._botUserId) : null;
-    if (!this.chat || !(message || reaction)) {
-      this.logger?.debug("Ignoring Signal envelope outside the supported message types");
-      return;
-    }
+    const reaction = message ? null : envelope && parseReaction(envelope, this._botUserId);
     // The receive loop does not wait for this before the next event: one slow handler must not
     // hold up other Conversations, and Chat's concurrency strategies need to see overlapping
     // messages. Chat logs handler failures itself; the catch keeps them from being logged twice.
     // A failed handler still advances the receive cursor: replaying it would hit Chat's dedupe,
     // and retrying it forever would block the cursor.
-    const handled = message
-      ? this.chat.processMessage(this, message.threadId, message)
-      : reaction && this.chat.processReaction({ ...reaction, adapter: this });
-    await Promise.resolve(handled).catch(() => {});
+    if (message && this.chat) {
+      await this.chat.processMessage(this, message.threadId, message).catch(() => {});
+    } else if (reaction && this.chat) {
+      await Promise.resolve(this.chat.processReaction({ ...reaction, adapter: this })).catch(() => {});
+    } else {
+      this.logger?.debug("Ignoring Signal envelope outside the supported message types");
+    }
   }
 }
 
