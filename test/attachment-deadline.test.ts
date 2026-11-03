@@ -147,7 +147,8 @@ it("is not cut short over HTTP by the fetch client's response-headers timeout", 
   // the test builds one from the global dispatcher's class with the limit scaled down. undici's
   // timers tick about once a second, so 100 ms fires after about 1 s; the reply comes after 2.5 s.
   await fetch("data:,").catch(() => {}); // creates the global dispatcher
-  const key = Symbol.for("undici.globalDispatcher.1");
+  // undici 8 (Node 26) keeps the Agent fetch uses under `.2` and a legacy wrapper under `.1`; undici 7 has only `.1`.
+  const key = [2, 1].map((v) => Symbol.for(`undici.globalDispatcher.${v}`)).find((k) => Reflect.has(globalThis, k))!;
   const original = Reflect.get(globalThis, key) as { constructor: new (options: object) => { close(): Promise<void> } };
   const strict = new original.constructor({ headersTimeout: 100 });
   Reflect.set(globalThis, key, strict);
