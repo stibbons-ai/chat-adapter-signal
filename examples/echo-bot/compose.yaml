@@ -7,12 +7,13 @@ services:
     image: registry.gitlab.com/packaging/signal-cli/signal-cli-native:v0-14-9-2
     # --no-receive-stdout keeps message contents out of the container log.
     command: daemon --http 0.0.0.0:8080 --receive-mode on-start --no-receive-stdout
-    # No `ports`: the HTTP daemon has no authentication. Only services on this
-    # compose network reach it, at http://signal-cli:8080.
+    # No `ports`: the HTTP daemon has no authentication. It is reachable at http://signal-cli:8080 from
+    # this compose network (and, on Linux, from the Docker host via the container's IP).
     volumes:
       - signal-cli-data:/var/lib/signal-cli
     tmpfs:
       - /tmp:exec
+    # The image has no curl or wget: probe /api/v1/check with bash's /dev/tcp.
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /api/v1/check HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '^HTTP/1.1 200' <&3"]
       interval: 10s
@@ -33,6 +34,8 @@ services:
     restart: unless-stopped
     # Forwards docker stop's SIGTERM to the bot also while it is still starting.
     init: true
+    # Longer than the adapter's drainTimeoutMs (10 s), so running handlers can finish on docker stop.
+    stop_grace_period: 20s
 
 volumes:
   signal-cli-data:

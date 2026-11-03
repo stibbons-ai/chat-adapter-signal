@@ -34,3 +34,12 @@ jobs:
       - run: docker compose -f examples/echo-bot/compose.yaml config --quiet
       # Builds the echo-bot image locally; nothing is pushed (ADR-0001).
       - run: docker compose -f examples/echo-bot/compose.yaml build echo-bot
+      # Smoke against the pinned signal-cli: no Bot Account is provisioned in CI, so the bot must reach
+      # the daemon over http://signal-cli:8080 and fail at the account check.
+      - run: docker compose -f examples/echo-bot/compose.yaml up -d --wait signal-cli
+      - run: |
+          out=$(SIGNAL_ACCOUNT=+15550000001 docker compose -f examples/echo-bot/compose.yaml run --rm echo-bot 2>&1 || true)
+          echo "$out"
+          grep -q 'Bot Account +15550000001 is not registered or linked on the signal-cli daemon at http://signal-cli:8080' <<<"$out"
+      - if: always()
+        run: docker compose -f examples/echo-bot/compose.yaml down -v

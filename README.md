@@ -118,7 +118,7 @@ compose file:
 
 - `signal-cli`: the community image `registry.gitlab.com/packaging/signal-cli/signal-cli-native`
   ([packaging/signal-cli](https://gitlab.com/packaging/signal-cli), a native build that needs no Java),
-  pinned to a release tag in `compose.yaml` (`v<signal-cli version>-<package build>`). It runs
+  pinned to a release tag in `compose.yaml`. It runs
   `daemon --http 0.0.0.0:8080 --receive-mode on-start --no-receive-stdout` and keeps its data (the Bot
   Account's keys and state) in the `signal-cli-data` volume. It publishes no ports.
 - `echo-bot`: [`bot.ts`](examples/echo-bot/bot.ts), which answers 1:1 messages and Mentions with
@@ -194,7 +194,8 @@ signal-cli's HTTP daemon, like its socket and TCP daemons, has no authentication
 it can read the Bot Account's messages and send as the bot.
 
 - Keep it on a private network. The example publishes no ports: only containers on the compose network
-  reach `http://signal-cli:8080`. Don't add `ports:` to the signal-cli service, not even on loopback:
+  (and, on Linux, the Docker host itself, through the container's IP) reach `http://signal-cli:8080`.
+  Don't add `ports:` to the signal-cli service, not even on loopback:
   bound to `0.0.0.0` in the container, signal-cli checks no `Host` header, so any web page you open could
   reach it through DNS rebinding. To look at it, use a one-off container on the compose network (e.g.
   `docker compose run --rm --entrypoint bash signal-cli`).
@@ -246,9 +247,11 @@ createSignalAdapter({
 ```
 
 Use a long random password and an `https://` URL only: basic auth sends the password with every request.
-Whoever passes the proxy gets all of signal-cli's JSON-RPC, not only sending and receiving. With missing
-or wrong credentials, `initialize()` rejects with `AuthenticationError` (HTTP 401). Any proxy and scheme
-works, e.g. a bearer token checked by the proxy, as long as the proxy:
+Whoever passes the proxy gets all of signal-cli's JSON-RPC, not only sending and receiving. Once the Bot
+Account is provisioned, start the daemon with `-a <account>` (`-a +15550000001 daemon --http …`): it then
+no longer serves the account-management methods (link, register) that a daemon without `-a`, like the
+example's, offers. With missing or wrong credentials, `initialize()` rejects with `AuthenticationError`
+(HTTP 401). Any proxy and scheme works, e.g. a bearer token checked by the proxy, as long as the proxy:
 
 - passes the event stream (`/api/v1/events`, server-sent events) through and keeps it open; Caddy and
   nginx do so with their defaults. Keep any proxy read timeout above signal-cli's keep-alive interval
@@ -258,6 +261,9 @@ works, e.g. a bearer token checked by the proxy, as long as the proxy:
   `localhost`, `127.0.0.1` or `::1` (with the bound port, if a port is given) and answers others with
   421. Caddy forwards the client's `Host` unless told `header_up Host {upstream_hostport}`; nginx sends
   the upstream's by default. Bound to `0.0.0.0`, as in the example, signal-cli checks no `Host`.
+- accepts request bodies as large as the attachments you send, base64-encoded (signal-cli takes up to
+  150 MiB): nginx refuses bodies over 1 MB by default (`client_max_body_size`) and answers 413, which
+  the adapter reports as a `NetworkError`; Caddy sets no limit.
 
 ## Deployment
 
