@@ -1,4 +1,5 @@
 import { defaultEmojiResolver, Message, type Author, type ReactionEvent } from "chat";
+import { parseAttachments, type SignalAttachment } from "./attachments.js";
 import { isSignalStyle, type SignalFormatConverter, type SignalMention, type SignalStyleRange } from "./format.js";
 import { encodeMessageId, encodeThreadId, isAci, isGroupId, isMessageTimestamp } from "./thread-id.js";
 
@@ -14,6 +15,7 @@ export interface SignalEnvelope {
   timestamp: number;
   dataMessage?: {
     timestamp: number;
+    /** `null` for a message without text, e.g. attachments only. */
     message?: string | null;
     /** Present for group messages; `groupId` is standard base64 (16 bytes for legacy groups, 32 for Groups v2). */
     groupInfo?: { groupId?: unknown } | null;
@@ -23,6 +25,10 @@ export interface SignalEnvelope {
     textStyles?: Array<{ style?: unknown; start?: unknown; length?: unknown } | null> | null;
     /** The message this one quote-replies to; `authorUuid` is its author's ACI. */
     quote?: { authorUuid?: unknown } | null;
+    /** Files sent with the message, already downloaded into signal-cli's attachment store. */
+    attachments?: Array<SignalAttachment | null> | null;
+    /** A view-once message; the adapter ignores these (out of scope). */
+    viewOnce?: unknown;
     /** A reaction to the message `targetAuthorUuid` sent at `targetSentTimestamp`; `message` is then null. */
     reaction?: { emoji?: unknown; targetAuthorUuid?: unknown; targetSentTimestamp?: unknown; isRemove?: unknown } | null;
     remoteDelete?: unknown;
@@ -47,13 +53,15 @@ export interface SignalSendResult {
 export type SignalRawMessage = SignalEnvelope | SignalSendResult;
 
 /**
- * Maps a 1:1 or Groups v2 text envelope to a Chat SDK message. Everything else
- * (sync messages, edits, reactions, deletes, receipts, typing, story replies,
- * legacy groups) maps to `null` (reactions: see `parseReaction`). Once the Bot
- * Account's ACI is known, group messages carry a definite `isMention`: true only
- * for a native @mention of the Bot Account or a quote-reply to one of its
- * messages, never for its name as plain text. Text styles become markdown; a
- * native @mention reads `@<userName>` for the Bot Account and `@<ACI>` for anyone else.
+ * Maps a 1:1 or Groups v2 message with text or attachments to a Chat SDK
+ * message. Everything else (sync messages, edits, reactions, deletes,
+ * receipts, typing, story replies, view-once messages, legacy groups) maps to
+ * `null` (reactions: see `parseReaction`). Once the Bot Account's ACI is known,
+ * group messages carry a definite `isMention`: true only for a native @mention
+ * of the Bot Account or a quote-reply to one of its messages, never for its
+ * name as plain text. Text styles become markdown; a native @mention reads
+ * `@<userName>` for the Bot Account and `@<ACI>` for anyone else. Attachments
+ * carry `fetchMetadata` but no `fetchData`; the adapter adds it.
  */
 export function parseTextMessage(
   envelope: SignalEnvelope,
@@ -67,16 +75,21 @@ export function parseTextMessage(
     !isAci(aci) ||
     !data ||
     !isMessageTimestamp(data.timestamp) ||
-    typeof data.message !== "string" ||
     data.reaction ||
     data.remoteDelete ||
-    data.storyContext
+    data.storyContext ||
+    data.viewOnce
   ) {
     return null;
   }
 
   const threadId = conversationOf(data, aci);
   if (!threadId) {
+    return null;
+  }
+  const attachments = parseAttachments(data.attachments, threadId);
+  const body = typeof data.message === "string" ? data.message : attachments.length > 0 ? "" : null;
+  if (body === null) {
     return null;
   }
   // Before the Bot Account's ACI is known (parseMessage before initialize), a Mention can't be decided.
@@ -102,7 +115,7 @@ export function parseTextMessage(
       styles.push({ style: range.style, start: range.start, length: range.length });
     }
   }
-  const { text, ast } = formatConverter.parseSignal(data.message, styles, mentions);
+  const { text, ast } = formatConverter.parseSignal(body, styles, mentions);
 
   return new Message<SignalRawMessage>({
     id: encodeMessageId(aci, data.timestamp),
@@ -112,7 +125,7 @@ export function parseTextMessage(
     raw: envelope,
     author: authorOf(envelope, aci, botAci),
     metadata: { dateSent: new Date(data.timestamp), edited: false },
-    attachments: [],
+    attachments,
     ...(isMention === undefined ? {} : { isMention }),
   });
 }

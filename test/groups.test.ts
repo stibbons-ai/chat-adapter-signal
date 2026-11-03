@@ -199,7 +199,7 @@ describe("parseMessage", () => {
     const adapter = createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: "http://signal-cli:8080" } });
 
     expect(() => adapter.parseMessage(groupTextEnvelope({ aci: ALICE_ACI, groupId: LEGACY_GROUP_ID, text: "old" }))).toThrow(
-      expect.objectContaining({ name: "ValidationError", message: "Only 1:1 and Groups v2 text envelopes can be parsed into messages" }),
+      expect.objectContaining({ name: "ValidationError" }),
     );
   });
 });

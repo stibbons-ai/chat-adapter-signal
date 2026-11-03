@@ -4,9 +4,9 @@ Signal adapter for the [Chat SDK](https://github.com/vercel/chat). It talks to a
 [signal-cli](https://github.com/AsamK/signal-cli) daemon that you install and run
 yourself; this package never bundles, downloads or installs signal-cli or libsignal.
 
-> Early development: 1:1 and Group text messages in and out, with formatting, edits, remote deletes,
-> reactions and read receipts, over signal-cli's HTTP daemon, a Unix socket, TCP, or a spawned
-> signal-cli. Attachments are not supported yet.
+> Early development: 1:1 and Group messages in and out, with formatting, attachments, edits, remote
+> deletes, reactions and read receipts, over signal-cli's HTTP daemon, a Unix socket, TCP, or a
+> spawned signal-cli.
 
 ## Requirements
 
@@ -215,6 +215,22 @@ several whole lines as a code block). `message.text` is the text as sent, with m
 without styles is taken literally: `*stars*` and `||bars||` typed on Signal stay as typed, also
 when `message.formatted` is posted back.
 
+## Attachments
+
+Attachments travel through signal-cli's JSON-RPC, never through a shared file system, so they work
+with signal-cli on another host or in a container.
+
+- Outgoing: `files` (and postable `attachments` that carry `data`) are sent as RFC 2397 data URIs,
+  `data:<MIME type>;filename=<name>;base64,<data>`; a file without `mimeType` goes as
+  `application/octet-stream`. URL-only attachments, empty files, and files on an edit are a
+  `ValidationError`.
+- Incoming: `message.attachments` carry `type` (image, video, audio or file), `name`, `mimeType`, `size`
+  and image dimensions; `fetchData()` asks signal-cli for the content (`getAttachment`). signal-cli
+  must download attachments on receive (the default; not with `--ignore-attachments`), else
+  `fetchData()` rejects with `ResourceNotFoundError`. Messages read back through `fetchMessages` can still fetch.
+  View-once messages are ignored.
+- Both ways the whole file is one base64 JSON-RPC message, held in memory (signal-cli 0.14.9 takes attachments up to 150 MiB).
+
 ## History, users and DMs
 
 Signal keeps no history on a server, so the adapter sets `persistThreadHistory` and Chat records
@@ -254,7 +270,7 @@ signal-cli failures surface as `@chat-adapter/shared` errors (signal-cli JSON-RP
 |---|---|
 | `AuthenticationError` | HTTP 401/403 (e.g. from a reverse proxy), or the daemon does not serve the Bot Account (`-32602` "Specified account does not exist", or the account is missing from `listAccounts`/`listContacts` at startup) |
 | `AdapterRateLimitError` | signal-cli rate-limit error (`-5`), or HTTP 429; `retryAfter` in seconds when known |
-| `ResourceNotFoundError` | The recipient is not registered with Signal (`-1`); `openDM` finds no ACI for a number or username; `fetchThread` of a Group the Bot Account is not in |
+| `ResourceNotFoundError` | The recipient is not registered with Signal (`-1`); `openDM` finds no ACI for a number or username; `fetchThread` of a Group the Bot Account is not in; an attachment's `fetchData()` when signal-cli has no such attachment (`-1`) |
 | `ValidationError` | Invalid request or parameters (`-32600`, other `-32602`, other `-1` user errors) |
 | `NetworkError` | signal-cli unreachable or not startable, a spawned signal-cli that exited, a dropped socket, other HTTP failures, malformed replies, signal-cli I/O errors (`-3`), or a send where every recipient failed on the network (`-1` with `NETWORK_FAILURE` results) |
 | `AdapterError` with `code` | `UNTRUSTED_IDENTITY` (`-4`), `CAPTCHA_REJECTED` (`-6`), `METHOD_NOT_FOUND` (`-32601`), `SIGNAL_CLI_ERROR` (anything else, e.g. `-32603`); from `initialize()`, `STARTUP_CANCELLED` when `disconnect()` ran during startup |
