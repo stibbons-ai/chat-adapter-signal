@@ -244,7 +244,7 @@ export class HttpTransport implements SignalTransport {
           } catch (error) {
             // A status outside 200-599 (a misbehaving proxy): Response refuses it, fetch reported it as non-2xx.
             incoming.destroy();
-            reject(new NetworkError(ADAPTER_NAME, `signal-cli ${what} at ${this.endpoint} returned HTTP ${status}`, error as Error));
+            reject(new NetworkError(ADAPTER_NAME, `signal-cli ${what} returned HTTP ${status}`, error as Error));
             return;
           }
           if (nullBody) {
@@ -252,6 +252,9 @@ export class HttpTransport implements SignalTransport {
           }
         });
         request.on("error", fail);
+        // A connection that closes with neither a response nor an error (e.g. a 101 reply, which node:http
+        // hands only to 'upgrade' listeners) would otherwise leave the request pending past its deadline.
+        request.on("close", () => fail(new Error("connection closed without a response")));
         request.end(body);
       } catch (error) {
         fail(error); // an invalid URL or header, as fetch would reject

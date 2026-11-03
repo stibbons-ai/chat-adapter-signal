@@ -168,18 +168,20 @@ it("is not cut short over HTTP by the fetch client's response-headers timeout", 
   expect(sent.raw.timestamp).toEqual(expect.any(Number));
 });
 
-it("reports an HTTP reply with a status outside 200-599 as a NetworkError", async () => {
+it.each([
   // node:http accepts any three-digit status, e.g. from a misbehaving proxy; a Response cannot hold it.
-  const server = createNetServer((socket) => socket.end("HTTP/1.1 600 Weird\r\nContent-Length: 0\r\n\r\n", () => socket.destroy()));
+  ["a status outside 200-599", "HTTP/1.1 600 Weird\r\nContent-Length: 0\r\n\r\n", /returned HTTP 600$/],
+  // node:http hands a 101 only to 'upgrade' listeners and just closes the request; without care it never settles.
+  ["a 101 Switching Protocols", "HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\nConnection: Upgrade\r\n\r\n", /closed without a response/],
+])("reports an HTTP reply with %s on a JSON-RPC request as a NetworkError", async (_case, reply, message) => {
+  const server = createNetServer((socket) => socket.end(reply, () => socket.destroy()));
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   cleanups.push(() => new Promise((resolve) => server.close(() => resolve())));
   const { port } = server.address() as AddressInfo;
   const transport = new HttpTransport({ type: "http", url: `http://127.0.0.1:${port}` }, BOT_ACCOUNT, REQUEST_TIMEOUT_MS);
 
-  await expect(transport.request("version")).rejects.toThrow(
-    expect.objectContaining({ name: "NetworkError", message: expect.stringMatching(/returned HTTP 600$/) }),
-  );
+  await expect(transport.request("version")).rejects.toThrow(expect.objectContaining({ name: "NetworkError", message: expect.stringMatching(message) }));
 });
 
 it.each([
