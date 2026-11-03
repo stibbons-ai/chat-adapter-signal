@@ -216,7 +216,7 @@ describe("getUser", () => {
     expect(names).toEqual(["Nick", "Contact Name", "File", "+15550003333", "only.42"]);
   });
 
-  it("returns null for an ACI signal-cli knows neither a name nor a number for, and rejects anything but an ACI", async () => {
+  it("returns null for an ACI signal-cli knows no name, number or username for, and rejects anything but an ACI", async () => {
     const { fake, adapter } = await echoBot();
     // signal-cli answers any ACI, with an empty entry for one it has not seen.
     expect(await adapter.getUser(CAROL_ACI)).toBeNull();
