@@ -1,5 +1,5 @@
 import { Message } from "chat";
-import { SIGNAL_STYLES, type SignalFormatConverter, type SignalMention, type SignalStyle, type SignalStyleRange } from "./format.js";
+import { isSignalStyle, type SignalFormatConverter, type SignalMention, type SignalStyleRange } from "./format.js";
 import { encodeMessageId, encodeThreadId, isAci, isGroupId } from "./thread-id.js";
 
 /**
@@ -128,10 +128,6 @@ export function parseTextMessage(
     attachments: [],
     ...(isMention === undefined ? {} : { isMention }),
   });
-}
-
-function isSignalStyle(value: unknown): value is SignalStyle {
-  return (SIGNAL_STYLES as readonly unknown[]).includes(value);
 }
 
 function isOffset(value: unknown): value is number {

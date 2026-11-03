@@ -2,10 +2,18 @@ import {
   BaseFormatConverter,
   cardChildToFallbackText,
   chartElementToFallbackText,
+  codeBlock,
+  emphasis,
+  inlineCode,
+  link,
+  paragraph,
   parseMarkdown,
   root,
+  strikethrough,
+  strong,
   tableElementToAscii,
   tableToAscii,
+  text,
   type AdapterPostableMessage,
   type CardChild,
   type CardElement,
@@ -40,7 +48,8 @@ export interface SignalMention {
 
 const SPOILER_MARKER = "||";
 /** Every Signal style this adapter handles, in the order inbound styles nest in the markdown AST (outermost first); MONOSPACE is a leaf (`inlineCode`). */
-export const SIGNAL_STYLES: readonly SignalStyle[] = ["SPOILER", "BOLD", "ITALIC", "STRIKETHROUGH", "MONOSPACE"];
+const SIGNAL_STYLES: readonly SignalStyle[] = ["SPOILER", "BOLD", "ITALIC", "STRIKETHROUGH", "MONOSPACE"];
+const BREAK = { type: "break" } as const;
 const PARAGRAPH_BREAK = /\n{2,}/g;
 
 /**
@@ -96,12 +105,16 @@ export class SignalFormatConverter extends BaseFormatConverter {
     for (const range of styles) {
       const end = Math.min(range.start + range.length, body.length);
       if (range.start >= 0 && range.start < end) {
-        const start = mapStart(range.start);
-        ranges.push({ style: range.style, start, length: mapEnd(end) - start });
+        const start = mapStart[range.start]!;
+        ranges.push({ style: range.style, start, length: mapEnd[end]! - start });
       }
     }
     return { text, ast: root(textToBlocks(text, ranges)) };
   }
+}
+
+export function isSignalStyle(value: unknown): value is SignalStyle {
+  return (SIGNAL_STYLES as readonly unknown[]).includes(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -187,12 +200,6 @@ function renderBlock(writer: SignalTextWriter, node: Nodes): void {
       return;
     case "thematicBreak":
       writer.write("———");
-      return;
-    case "html":
-      writer.write(node.value);
-      return;
-    case "paragraph":
-      renderInlines(writer, node.children);
       return;
     default:
       if ("children" in node) {
@@ -302,16 +309,16 @@ function cardToAst(card: CardElement): Root {
   const blocks: Content[] = [];
   const header: Content[] = [];
   if (card.title) {
-    header.push({ type: "strong", children: [{ type: "text", value: card.title }] });
+    header.push(strong([text(card.title)]));
   }
   if (card.subtitle) {
     if (header.length > 0) {
-      header.push({ type: "break" });
+      header.push(BREAK);
     }
-    header.push({ type: "text", value: card.subtitle });
+    header.push(text(card.subtitle));
   }
   if (header.length > 0) {
-    blocks.push({ type: "paragraph", children: header as never });
+    blocks.push(paragraph(header));
   }
   if (card.imageUrl) {
     blocks.push(linkParagraph(card.imageUrl, card.imageUrl));
@@ -326,13 +333,11 @@ function cardChildToAst(child: CardChild): Content[] {
   switch (child.type) {
     case "text": {
       const content = parseMarkdown(child.content).children;
-      const style = child.style === "bold" ? "strong" : child.style === "muted" ? "emphasis" : undefined;
+      const style = child.style === "bold" ? strong : child.style === "muted" ? emphasis : undefined;
       if (!style) {
         return content;
       }
-      return content.map((block) =>
-        block.type === "paragraph" ? { type: "paragraph", children: [{ type: style, children: block.children }] } : block,
-      );
+      return content.map((block) => (block.type === "paragraph" ? paragraph([style(block.children)]) : block));
     }
     case "image":
       return [linkParagraph(child.url, child.alt || child.url)];
@@ -344,72 +349,70 @@ function cardChildToAst(child: CardChild): Content[] {
       return child.children.flatMap(cardChildToAst);
     case "fields":
       return [
-        {
-          type: "paragraph",
-          children: child.children.flatMap((field, index) => [
-            ...(index > 0 ? [{ type: "break" } as const] : []),
-            { type: "strong", children: [{ type: "text", value: field.label }] } as const,
-            { type: "text", value: `: ${field.value}` } as const,
+        paragraph(
+          child.children.flatMap((field, index) => [
+            ...(index > 0 ? [BREAK] : []),
+            strong([text(field.label)]),
+            text(`: ${field.value}`),
           ]),
-        },
+        ),
       ];
     case "table":
-      return [{ type: "code", value: tableElementToAscii(child.headers, child.rows) }];
+      return [codeBlock(tableElementToAscii(child.headers, child.rows))];
     case "chart":
-      return [{ type: "code", value: chartElementToFallbackText(child) }];
+      return [codeBlock(chartElementToFallbackText(child))];
     case "actions":
       // Buttons and selects need interactivity Signal lacks; link buttons are just links.
       return child.children.flatMap((action) =>
         action.type === "link-button" ? [linkParagraph(action.url, action.label)] : [],
       );
     default: {
-      const text = cardChildToFallbackText(child);
-      return text ? [{ type: "paragraph", children: [{ type: "text", value: text }] }] : [];
+      const fallback = cardChildToFallbackText(child);
+      return fallback ? [paragraph([text(fallback)])] : [];
     }
   }
 }
 
 function linkParagraph(url: string, label: string): Content {
-  return { type: "paragraph", children: [{ type: "link", url, children: [{ type: "text", value: label }] }] };
+  return paragraph([link(url, [text(label)])]);
 }
 
 // ---------------------------------------------------------------------------
 // Inbound: text + style ranges -> markdown AST
 
-/** Replaces mentions with their text and maps offsets in the body to offsets in the result. */
+/**
+ * Replaces mentions with their text. `mapStart` / `mapEnd` map every offset in
+ * the body to the result (one lookup each, however many mentions): an offset
+ * inside a mention moves to the mention's start for a range start, its end
+ * for a range end.
+ */
 function resolveMentions(body: string, mentions: readonly SignalMention[]) {
-  const valid: SignalMention[] = [];
-  let end = 0;
-  for (const mention of [...mentions].sort((a, b) => a.start - b.start)) {
-    if (mention.start >= end && mention.length > 0 && mention.start + mention.length <= body.length) {
-      valid.push(mention);
-      end = mention.start + mention.length;
-    }
-  }
-
   let text = "";
+  const mapStart = new Uint32Array(body.length + 1);
+  const mapEnd = new Uint32Array(body.length + 1);
   let cursor = 0;
-  for (const mention of valid) {
-    text += body.slice(cursor, mention.start) + mention.text;
-    cursor = mention.start + mention.length;
-  }
-  text += body.slice(cursor);
-
-  // An offset inside a mention moves to the mention's start (a range start) or end (a range end).
-  const map = (offset: number, inside: "start" | "end") => {
-    let shift = 0;
-    for (const mention of valid) {
-      if (offset <= mention.start) {
-        break;
-      }
-      if (offset < mention.start + mention.length) {
-        return mention.start + shift + (inside === "end" ? mention.text.length : 0);
-      }
-      shift += mention.text.length - mention.length;
+  for (const mention of [...mentions].sort((a, b) => a.start - b.start)) {
+    const end = mention.start + mention.length;
+    if (mention.start < cursor || mention.length === 0 || end > body.length) {
+      continue;
     }
-    return offset + shift;
-  };
-  return { text, mapStart: (offset: number) => map(offset, "start"), mapEnd: (offset: number) => map(offset, "end") };
+    text += body.slice(cursor, mention.start);
+    for (; cursor <= mention.start; cursor++) {
+      mapStart[cursor] = mapEnd[cursor] = text.length - (mention.start - cursor);
+    }
+    const start = text.length;
+    text += mention.text;
+    for (; cursor < end; cursor++) {
+      mapStart[cursor] = start;
+      mapEnd[cursor] = text.length;
+    }
+  }
+  const rest = text.length - cursor;
+  text += body.slice(cursor);
+  for (; cursor <= body.length; cursor++) {
+    mapStart[cursor] = mapEnd[cursor] = cursor + rest;
+  }
+  return { text, mapStart, mapEnd };
 }
 
 /** A run of text with one set of active styles. */
@@ -449,28 +452,42 @@ function segment(length: number, ranges: readonly SignalStyleRange[]): Segment[]
  */
 function textToBlocks(text: string, ranges: readonly SignalStyleRange[]): Content[] {
   const segments = segment(text.length, ranges);
-  const codeBlocks: Array<{ start: number; end: number }> = [];
-  for (const run of monospaceRuns(segments)) {
-    const startsLine = run.start === 0 || text[run.start - 1] === "\n";
-    const endsLine = run.end === text.length || text[run.end] === "\n";
-    if (startsLine && endsLine && text.slice(run.start, run.end).includes("\n")) {
-      codeBlocks.push(run);
-    }
-  }
+  const codeBlocks = monospaceRuns(segments).filter(
+    ({ start, end }) =>
+      (start === 0 || text[start - 1] === "\n") &&
+      (end === text.length || text[end] === "\n") &&
+      text.slice(start, end).includes("\n"),
+  );
 
   const blocks: Content[] = [];
+  // Paragraphs come in order, so the first segment a paragraph needs never lies before the previous one's.
+  let first = 0;
+  const addParagraph = (from: number, to: number) => {
+    while (from < to && text[from] === "\n") from++;
+    while (to > from && text[to - 1] === "\n") to--;
+    if (from === to) {
+      return;
+    }
+    while (segments[first]!.end <= from) first++;
+    const pieces: Piece[] = [];
+    for (let index = first; index < segments.length && segments[index]!.start < to; index++) {
+      const piece = segments[index]!;
+      pieces.push({ value: text.slice(Math.max(piece.start, from), Math.min(piece.end, to)), styles: piece.styles });
+    }
+    blocks.push(paragraph(inlines(pieces, 0)));
+  };
   const paragraphs = (from: number, to: number) => {
     let start = from;
     for (const separator of text.slice(from, to).matchAll(PARAGRAPH_BREAK)) {
-      blocks.push(...paragraph(segments, text, start, from + separator.index));
+      addParagraph(start, from + separator.index);
       start = from + separator.index + separator[0].length;
     }
-    blocks.push(...paragraph(segments, text, start, to));
+    addParagraph(start, to);
   };
   let cursor = 0;
   for (const code of codeBlocks) {
     paragraphs(cursor, code.start);
-    blocks.push({ type: "code", value: text.slice(code.start, code.end) });
+    blocks.push(codeBlock(text.slice(code.start, code.end)));
     cursor = code.end;
   }
   paragraphs(cursor, text.length);
@@ -493,18 +510,6 @@ function monospaceRuns(segments: readonly Segment[]): Array<{ start: number; end
   return runs;
 }
 
-/** The paragraph for `[from, to)` without its surrounding line breaks, or nothing when that is empty. */
-function paragraph(segments: readonly Segment[], text: string, from: number, to: number): Content[] {
-  while (from < to && text[from] === "\n") from++;
-  while (to > from && text[to - 1] === "\n") to--;
-  if (from === to) {
-    return [];
-  }
-  const pieces = segments
-    .filter((piece) => piece.end > from && piece.start < to)
-    .map((piece) => ({ value: text.slice(Math.max(piece.start, from), Math.min(piece.end, to)), styles: piece.styles }));
-  return [{ type: "paragraph", children: inlines(pieces, 0) as never }];
-}
 
 type Piece = { value: string; styles: ReadonlySet<SignalStyle> };
 
@@ -525,20 +530,17 @@ function inlines(pieces: readonly Piece[], depth: number): Content[] {
     if (!styled) {
       nodes.push(...inlines(run, depth + 1));
     } else if (style === "MONOSPACE") {
-      nodes.push({ type: "inlineCode", value: run.map((piece) => piece.value).join("") });
+      nodes.push(inlineCode(run.map((piece) => piece.value).join("")));
     } else if (style === "SPOILER") {
-      nodes.push({ type: "text", value: SPOILER_MARKER }, ...inlines(run, depth + 1), { type: "text", value: SPOILER_MARKER });
+      nodes.push(text(SPOILER_MARKER), ...inlines(run, depth + 1), text(SPOILER_MARKER));
     } else {
-      const type = style === "BOLD" ? "strong" : style === "ITALIC" ? "emphasis" : "delete";
-      nodes.push({ type, children: inlines(run, depth + 1) } as Content);
+      const node = style === "BOLD" ? strong : style === "ITALIC" ? emphasis : strikethrough;
+      nodes.push(node(inlines(run, depth + 1)));
     }
   }
   return nodes;
 }
 
 function textWithBreaks(value: string): Content[] {
-  return value.split("\n").flatMap((line, index): Content[] => [
-    ...(index > 0 ? [{ type: "break" } as const] : []),
-    ...(line ? [{ type: "text", value: line } as const] : []),
-  ]);
+  return value.split("\n").flatMap((line, index): Content[] => [...(index > 0 ? [BREAK] : []), ...(line ? [text(line)] : [])]);
 }

@@ -225,8 +225,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   parseMessage(raw: SignalRawMessage): Message<SignalRawMessage> {
-    const bot = { aci: this._botUserId, userName: this._userName };
-    const message = "sourceUuid" in raw ? parseTextMessage(raw, this.formatConverter, bot) : null;
+    const message = "sourceUuid" in raw ? parseTextMessage(raw, this.formatConverter, this.bot) : null;
     if (!message) {
       throw new ValidationError(ADAPTER_NAME, "Only 1:1 and Groups v2 text envelopes can be parsed into messages");
     }
@@ -332,6 +331,11 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     return { aci: self.aci, number: self.number };
   }
 
+  /** What the envelope parser needs of the Bot Account: its ACI once known, and its name for Mentions. */
+  private get bot(): { aci: string | undefined; userName: string } {
+    return { aci: this._botUserId, userName: this._userName };
+  }
+
   private requireBotAci(): string {
     if (!this._botUserId) {
       throw new ValidationError(ADAPTER_NAME, "The Signal adapter is not initialized; call chat.initialize() first");
@@ -357,8 +361,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       });
       return;
     }
-    const bot = { aci: this._botUserId, userName: this._userName };
-    const message = envelope && parseTextMessage(envelope, this.formatConverter, bot);
+    const message = envelope && parseTextMessage(envelope, this.formatConverter, this.bot);
     if (!(message && this.chat)) {
       this.logger?.debug("Ignoring Signal envelope outside the supported message types");
       return;
