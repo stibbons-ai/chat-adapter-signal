@@ -464,7 +464,7 @@ describe("reconnect on line transports", () => {
   it("subscribe rejects for an aborted signal, and an abort afterwards stops delivery without onClosed", async () => {
     const fake = await startFake();
     const port = await fake.listenTcp();
-    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port }, BOT_ACCOUNT);
+    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port }, BOT_ACCOUNT, 60_000);
     cleanups.push(() => transport.close());
     const events: unknown[] = [];
     const listener = { onEvent: (event: unknown) => events.push(event), onError: () => {}, onClosed: vi.fn() };
@@ -485,7 +485,7 @@ describe("reconnect on line transports", () => {
   });
 
   it("an abort while still connecting rejects subscribe at once with the abort reason", async () => {
-    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port: 1 }, BOT_ACCOUNT);
+    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port: 1 }, BOT_ACCOUNT, 60_000);
     // A connect that never answers (a TCP host that drops SYNs), released only by the cleanup.
     let fail!: (error: Error) => void;
     Object.assign(transport, { open: () => new Promise((_, reject) => (fail = reject)) });
@@ -505,7 +505,7 @@ describe("reconnect on line transports", () => {
   it("keeps events pushed on a connection a reply reopened after a drop, for the next subscribe", async () => {
     const fake = await startFake();
     const port = await fake.listenTcp();
-    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port }, BOT_ACCOUNT);
+    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port }, BOT_ACCOUNT, 60_000);
     cleanups.push(() => transport.close());
     const events: unknown[] = [];
     const closed = vi.fn();
@@ -526,7 +526,7 @@ describe("reconnect on line transports", () => {
   it("keeps the buffered events through a second drop before the next subscribe, at most 1 000", async () => {
     const fake = await startFake();
     const port = await fake.listenTcp();
-    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port }, BOT_ACCOUNT);
+    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port }, BOT_ACCOUNT, 60_000);
     cleanups.push(() => transport.close());
     const events: unknown[] = [];
     const closed = vi.fn();
@@ -551,7 +551,7 @@ describe("reconnect on line transports", () => {
   it("closing an older subscription of the same listener leaves the newer one delivering", async () => {
     const fake = await startFake();
     const port = await fake.listenTcp();
-    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port }, BOT_ACCOUNT);
+    const transport = new LineTransport({ type: "tcp", host: "127.0.0.1", port }, BOT_ACCOUNT, 60_000);
     cleanups.push(() => transport.close());
     const events: unknown[] = [];
     const listener = { onEvent: (event: unknown) => events.push(event), onError: () => {}, onClosed: () => {} };

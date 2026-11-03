@@ -234,6 +234,11 @@ export class FakeSignalCli {
     return release;
   }
 
+  /** Never answer later calls of `method` (recorded, then left open), like a wedged signal-cli; `stop()` still closes their connections. */
+  swallowRpc(method: string): void {
+    this.holds.set(method, new Promise<void>(() => {}));
+  }
+
   /** Like signal-cli's `Manager.getSelfIdentifier()`: the number, or the ACI for an account without one. */
   private get selfIdentifier(): string {
     const self = this.accounts[0];

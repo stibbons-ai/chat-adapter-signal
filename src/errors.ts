@@ -115,6 +115,11 @@ export function unreachable(what: string, cause: unknown): NetworkError {
   );
 }
 
+/** A request signal-cli accepted but did not answer in time (wedged daemon, half-open connection, stuck process). */
+export function timedOut(what: string, timeoutMs: number): NetworkError {
+  return new NetworkError(ADAPTER_NAME, `${what} did not answer within ${timeoutMs} ms`);
+}
+
 /** Largest delay Node's `setTimeout` honours (2^31 - 1 ms). */
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
