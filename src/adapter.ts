@@ -1,5 +1,6 @@
 import { AdapterError, AuthenticationError, NetworkError, ValidationError } from "@chat-adapter/shared";
 import {
+  defaultEmojiResolver,
   NotImplementedError,
   type Adapter,
   type AdapterPostableMessage,
@@ -13,6 +14,7 @@ import {
   type ThreadInfo,
 } from "chat";
 import {
+  parseReaction,
   parseTextMessage,
   type ReceiveEvent,
   type SignalRawMessage,
@@ -25,11 +27,13 @@ import { HttpTransport, type HttpTransportOptions } from "./transport/http.js";
 import { LineTransport, type LineTransportOptions } from "./transport/line.js";
 import type { SignalTransport } from "./transport/types.js";
 import {
+  decodeMessageId,
   decodeThreadId,
   encodeMessageId,
   encodeThreadId,
   isAci,
   normalizeAci,
+  type SignalMessageId,
   type SignalThreadId,
 } from "./thread-id.js";
 
@@ -239,31 +243,48 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   async postMessage(threadId: string, message: AdapterPostableMessage): Promise<RawMessage<SignalRawMessage>> {
     const conversation = decodeThreadId(threadId);
     const botAci = this.requireBotAci();
-    const result = await this.transport.request<SignalSendResult | null>("send", {
-      account: this.account,
-      ...(conversation.type === "dm" ? { recipient: [conversation.aci] } : { groupId: conversation.groupId }),
-      message: this.formatConverter.renderPostable(message),
-    });
-    if (!(result && Number.isSafeInteger(result.timestamp))) {
-      throw new NetworkError(ADAPTER_NAME, "signal-cli send returned no message timestamp");
-    }
+    const result = await this.send(conversation, message);
     return { id: encodeMessageId(botAci, result.timestamp), threadId, raw: result };
   }
 
-  async editMessage(): Promise<RawMessage<SignalRawMessage>> {
-    throw new NotImplementedError("The Signal adapter does not support editing messages yet", "editMessage");
+  /** Edits one of the Bot Account's own messages; its ID stays that of the original message, which later edits target. */
+  async editMessage(threadId: string, messageId: string, message: AdapterPostableMessage): Promise<RawMessage<SignalRawMessage>> {
+    const { conversation, timestamp } = this.ownMessage(threadId, messageId, "edit");
+    const result = await this.send(conversation, message, { editTimestamp: timestamp });
+    return { id: messageId, threadId, raw: result };
   }
 
-  async deleteMessage(): Promise<void> {
-    throw new NotImplementedError("The Signal adapter does not support deleting messages yet", "deleteMessage");
+  /** Deletes one of the Bot Account's own messages for everyone (Signal's remote delete). */
+  async deleteMessage(threadId: string, messageId: string): Promise<void> {
+    const { conversation, timestamp } = this.ownMessage(threadId, messageId, "delete");
+    await this.transport.request("remoteDelete", {
+      account: this.account,
+      ...recipientParams(conversation),
+      targetTimestamp: timestamp,
+    });
   }
 
-  async addReaction(_threadId: string, _messageId: string, _emoji: EmojiValue | string): Promise<void> {
-    throw new NotImplementedError("The Signal adapter does not support reactions yet", "addReaction");
+  /** Signal keeps one reaction per user per message: a new one replaces the Bot Account's previous one. */
+  async addReaction(threadId: string, messageId: string, emoji: EmojiValue | string): Promise<void> {
+    await this.sendReaction(threadId, messageId, emoji, false);
   }
 
-  async removeReaction(_threadId: string, _messageId: string, _emoji: EmojiValue | string): Promise<void> {
-    throw new NotImplementedError("The Signal adapter does not support reactions yet", "removeReaction");
+  async removeReaction(threadId: string, messageId: string, emoji: EmojiValue | string): Promise<void> {
+    await this.sendReaction(threadId, messageId, emoji, true);
+  }
+
+  /** Sends a read receipt to the message's author; in a Group, only the author sees it. */
+  async markAsRead(threadId: string, messageId: string): Promise<void> {
+    const { authorAci, timestamp } = this.messageIn(threadId, messageId).message;
+    if (authorAci === this._botUserId) {
+      throw new ValidationError(ADAPTER_NAME, "Cannot send a read receipt for the Bot Account's own message");
+    }
+    await this.transport.request("sendReceipt", {
+      account: this.account,
+      recipient: authorAci,
+      targetTimestamp: [timestamp],
+      type: "read",
+    });
   }
 
   async startTyping(): Promise<void> {
@@ -334,7 +355,62 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     return this._botUserId;
   }
 
-  /** Settles once `processMessage` for the message completes, or at once when the event is ignored. */
+  /** Sends a message (or, with `editTimestamp`, an edit) and returns signal-cli's result with the sent timestamp. */
+  private async send(
+    conversation: SignalThreadId,
+    message: AdapterPostableMessage,
+    extra: { editTimestamp?: number } = {},
+  ): Promise<SignalSendResult> {
+    const result = await this.transport.request<SignalSendResult | null>("send", {
+      account: this.account,
+      ...recipientParams(conversation),
+      message: this.formatConverter.renderPostable(message),
+      ...extra,
+    });
+    if (!(result && Number.isSafeInteger(result.timestamp))) {
+      throw new NetworkError(ADAPTER_NAME, "signal-cli send returned no message timestamp");
+    }
+    return result;
+  }
+
+  private async sendReaction(threadId: string, messageId: string, emoji: EmojiValue | string, remove: boolean): Promise<void> {
+    const { conversation, message } = this.messageIn(threadId, messageId);
+    await this.transport.request("sendReaction", {
+      account: this.account,
+      ...recipientParams(conversation),
+      // Unicode for a known Chat SDK emoji name; anything else is passed through as the emoji itself.
+      emoji: defaultEmojiResolver.toGChat(emoji),
+      targetAuthor: message.authorAci,
+      targetTimestamp: message.timestamp,
+      ...(remove ? { remove: true } : {}),
+    });
+  }
+
+  /**
+   * Decodes a Conversation and a message in it. A 1:1 Conversation holds only
+   * messages of its user and the Bot Account; a Group's members are not known
+   * here, so any author is accepted there.
+   */
+  private messageIn(threadId: string, messageId: string): { conversation: SignalThreadId; message: SignalMessageId } {
+    const conversation = decodeThreadId(threadId);
+    const message = decodeMessageId(messageId);
+    const botAci = this.requireBotAci();
+    if (conversation.type === "dm" && message.authorAci !== conversation.aci && message.authorAci !== botAci) {
+      throw new ValidationError(ADAPTER_NAME, `Message ${messageId} is not part of the 1:1 Conversation ${threadId}`);
+    }
+    return { conversation, message };
+  }
+
+  /** Like `messageIn`, but only for the Bot Account's own messages: Signal lets nobody else edit or delete them. */
+  private ownMessage(threadId: string, messageId: string, action: "edit" | "delete"): { conversation: SignalThreadId; timestamp: number } {
+    const { conversation, message } = this.messageIn(threadId, messageId);
+    if (message.authorAci !== this._botUserId) {
+      throw new ValidationError(ADAPTER_NAME, `The Signal adapter can only ${action} the Bot Account's own messages`);
+    }
+    return { conversation, timestamp: message.timestamp };
+  }
+
+  /** Settles once Chat has processed the message or reaction, or at once when the event is ignored. */
   private async handleEvent(event: ReceiveEvent): Promise<void> {
     const { account, envelope, exception } = event;
     // A multi-account daemon pushes every account's events over a socket or TCP connection.
@@ -353,7 +429,8 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       return;
     }
     const message = envelope && parseTextMessage(envelope, this.formatConverter, this._botUserId);
-    if (!(message && this.chat)) {
+    const reaction = !message && envelope ? parseReaction(envelope, this._botUserId) : null;
+    if (!this.chat || !(message || reaction)) {
       this.logger?.debug("Ignoring Signal envelope outside the supported message types");
       return;
     }
@@ -362,7 +439,10 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     // messages. Chat logs handler failures itself; the catch keeps them from being logged twice.
     // A failed handler still advances the receive cursor: replaying it would hit Chat's dedupe,
     // and retrying it forever would block the cursor.
-    await this.chat.processMessage(this, message.threadId, message).catch(() => {});
+    const handled = message
+      ? this.chat.processMessage(this, message.threadId, message)
+      : reaction && this.chat.processReaction({ ...reaction, adapter: this });
+    await Promise.resolve(handled).catch(() => {});
   }
 }
 
@@ -403,4 +483,8 @@ function createTransport(config: SignalTransportConfig, account: string): Signal
       throw new ValidationError(ADAPTER_NAME, `Unsupported transport type ${JSON.stringify((unsupported as { type?: unknown }).type)}`);
     }
   }
+}
+
+function recipientParams(conversation: SignalThreadId): { recipient: string[] } | { groupId: string } {
+  return conversation.type === "dm" ? { recipient: [conversation.aci] } : { groupId: conversation.groupId };
 }

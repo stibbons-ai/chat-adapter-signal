@@ -4,8 +4,9 @@ Signal adapter for the [Chat SDK](https://github.com/vercel/chat). It talks to a
 [signal-cli](https://github.com/AsamK/signal-cli) daemon that you install and run
 yourself; this package never bundles, downloads or installs signal-cli or libsignal.
 
-> Early development: 1:1 and Group text messages in and out, over signal-cli's HTTP daemon,
-> a Unix socket, TCP, or a spawned signal-cli. Formatting, reactions and attachments are not supported yet.
+> Early development: 1:1 and Group text messages in and out, edits, remote deletes, reactions and
+> read receipts, over signal-cli's HTTP daemon, a Unix socket, TCP, or a spawned signal-cli.
+> Formatting and attachments are not supported yet.
 
 ## Requirements
 
@@ -162,7 +163,21 @@ sends to the whole Group. Every Group message the adapter hands to Chat has `mes
 U+FFFC in `message.text` for now.
 
 Not user input, so never handed to Chat: sync messages from the Bot Account's own linked devices,
-edits, remote deletes, reactions, receipts, typing indicators, story replies, and legacy-group messages.
+edits, remote deletes, receipts, typing indicators, story replies, and legacy-group messages.
+
+## Message actions
+
+- `editMessage` and `deleteMessage` (also `sent.edit()`, `sent.delete()`) work on the Bot Account's own
+  messages only; anything else is a `ValidationError`. An edited message keeps its original ID, and
+  later edits target the original. Signal clients accept edits for a limited time (24 hours when sending)
+  and show the message as edited.
+- `addReaction` and `removeReaction` react to any message; Chat SDK emoji (`emoji.thumbs_up`) and
+  their names become Unicode, other strings are sent as they are and should be one emoji. Signal keeps
+  one reaction per user per message, so a new reaction replaces the bot's previous one.
+- Incoming reactions in 1:1 Conversations and Groups fire `onReaction` with `added`, the normalized
+  `emoji` (`rawEmoji` is Signal's Unicode) and the reacted-to `messageId`; reactions to stories are ignored.
+- `thread.markAsRead()` sends a read receipt to the message's author (in a Group, only the author
+  sees it); not for the Bot Account's own messages.
 
 ## Errors
 
