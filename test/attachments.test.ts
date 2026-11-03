@@ -31,7 +31,7 @@ async function bot(options?: Parameters<typeof startBot>[0]): Promise<Bot> {
 function readAsSignalCli(uri: string): { mediaType: string; filename: string | undefined; data: Buffer } {
   const match = /^data:(?<type>.+?\/.+?)?(?<parameters>;.+?=.+?)?(?<base64>;base64)?,(?<data>.+)$/i.exec(uri);
   if (!match?.groups) {
-    throw new Error(`signal-cli would read ${uri} as a file path`);
+    throw new Error(`signal-cli would reject ${uri} as an invalid data URI`);
   }
   const { type, parameters, base64, data } = match.groups;
   const parameter = parameters && /^;(?<key>.+)=(?<value>.+)/i.exec(parameters)?.groups;
@@ -44,7 +44,9 @@ function readAsSignalCli(uri: string): { mediaType: string; filename: string | u
 }
 
 function sentAttachments(bot: Bot): string[] {
-  return bot.fake.rpcRequests("send").at(-1)?.params?.attachments as string[];
+  const attachments = bot.fake.rpcRequests("send").at(-1)?.params?.attachments;
+  expect(attachments, "attachments of the last send").toBeInstanceOf(Array);
+  return attachments as string[];
 }
 
 describe("outbound attachments", () => {
@@ -208,15 +210,17 @@ describe("inbound attachments", () => {
       attachmentEnvelope({
         aci: ALICE_ACI,
         attachments: [
-          { id: "a", contentType: "IMAGE/JPEG; quality=high", size: -1, width: 0, height: 0 },
-          { id: "b", contentType: "not a type", size: 1.5, width: 12.5, height: -3 },
-          { id: "c", contentType: "", size: 0 },
+          { id: "a", contentType: "IMAGE/JPEG", size: -1, width: 0, height: 0 },
+          { id: "b", contentType: "audio/aac; codecs=mp4a.40.2" },
+          { id: "c", contentType: "not a type", size: 1.5, width: 12.5, height: -3 },
+          { id: "d", contentType: "", size: 0 },
         ],
       }),
     );
 
     expect(message.attachments.map(({ fetchMetadata: _, fetchData: __, ...attachment }) => attachment)).toEqual([
       { type: "image", mimeType: "image/jpeg" },
+      { type: "audio", mimeType: "audio/aac", size: 0 },
       { type: "file" },
       { type: "file", size: 0 },
     ]);
@@ -229,7 +233,9 @@ describe("inbound attachments", () => {
       attachmentEnvelope({ aci: ALICE_ACI, attachments: [{ id: "never-downloaded.jpg", contentType: "image/jpeg" }] }),
     );
 
-    await expect(message.attachments[0]!.fetchData!()).rejects.toBeInstanceOf(ResourceNotFoundError);
+    await expect(message.attachments[0]!.fetchData!()).rejects.toThrow(
+      expect.objectContaining({ name: "ResourceNotFoundError", resourceType: "attachment", resourceId: "never-downloaded.jpg" }),
+    );
   });
 
   it("ignores view-once messages", async () => {

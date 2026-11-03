@@ -62,7 +62,7 @@ async function bytesOf(data: Buffer | Blob | ArrayBuffer): Promise<Buffer> {
 }
 
 function dataUri(data: Buffer, mimeType: string | undefined, name: string | undefined): string {
-  // signal-cli reads `data:…;base64,` with nothing after it as a file path instead.
+  // signal-cli rejects `data:…;base64,` with nothing after it ("Invalid data URI"); fail before the round trip.
   if (data.length === 0) {
     throw new ValidationError(ADAPTER_NAME, `Signal cannot send the empty attachment ${JSON.stringify(name ?? "")}`);
   }

@@ -222,10 +222,10 @@ with signal-cli on another host or in a container.
 
 - Outgoing: `files` (and postable `attachments` that carry `data`) are sent as RFC 2397 data URIs,
   `data:<MIME type>;filename=<name>;base64,<data>`; a file without `mimeType` goes as
-  `application/octet-stream`. URL-only attachments, empty files, and files or attachments on an edit
-  are a `ValidationError`.
+  `application/octet-stream`. URL-only attachments, data that is not a Buffer, Blob or ArrayBuffer, empty
+  files, invalid MIME types, and files or attachments on an edit are a `ValidationError`.
 - Incoming: `message.attachments` carry `type` (image, video, audio or file), `name`, `mimeType` (an invalid
-  one is dropped), `size` and image dimensions; `fetchData()` asks signal-cli for the content
+  one is dropped), `size` and, when Signal sends them, `width`/`height`; `fetchData()` asks signal-cli for the content
   (`getAttachment`). signal-cli must have the file (it downloads attachments on receive unless run
   with `--ignore-attachments`), else `fetchData()` rejects with `ResourceNotFoundError`. Attachments
   of messages read back through `fetchMessages` can still fetch their content. View-once messages are ignored.
