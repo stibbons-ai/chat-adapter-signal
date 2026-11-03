@@ -247,10 +247,16 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     return { id: encodeMessageId(botAci, result.timestamp), threadId, raw: result };
   }
 
-  /** Edits one of the Bot Account's own messages; its ID stays that of the original message, which later edits target. */
+  /**
+   * Edits one of the Bot Account's own messages; it keeps its ID, as Chat's `sent.edit()`
+   * assumes. Signal clients react to an edited message by the edit's timestamp, so the
+   * adapter remembers which message each edit revises and reports such reactions on it.
+   */
   async editMessage(threadId: string, messageId: string, message: AdapterPostableMessage): Promise<RawMessage<SignalRawMessage>> {
     const { conversation, timestamp } = this.ownMessage(threadId, messageId, "edit");
     const result = await this.send(conversation, message, timestamp);
+    const editId = encodeMessageId(this.requireBotAci(), result.timestamp);
+    await this.chat?.getState().set(this.editKey(editId), messageId, EDIT_TARGET_TTL_MS);
     return { id: messageId, threadId, raw: result };
   }
 
@@ -371,11 +377,15 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
 
   private async sendReaction(threadId: string, messageId: string, emoji: EmojiValue | string, remove: boolean): Promise<void> {
     const { conversation, message } = this.messageIn(threadId, messageId);
+    // Unicode for a known Chat SDK emoji name; anything else is passed through as the emoji itself.
+    const unicode = defaultEmojiResolver.toGChat(emoji);
+    if (!unicode.trim()) {
+      throw new ValidationError(ADAPTER_NAME, "A Signal reaction needs an emoji");
+    }
     await this.transport.request("sendReaction", {
       account: this.account,
       ...recipientParams(conversation),
-      // Unicode for a known Chat SDK emoji name; anything else is passed through as the emoji itself.
-      emoji: defaultEmojiResolver.toGChat(emoji),
+      emoji: unicode,
       targetAuthor: message.authorAci,
       targetTimestamp: message.timestamp,
       ...(remove ? { remove: true } : {}),
@@ -397,7 +407,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     return { conversation, message };
   }
 
-  /** Like `messageIn`, but only for the Bot Account's own messages: Signal lets nobody else edit or delete them. */
+  /** Like `messageIn`, but only for the Bot Account's own messages: the adapter sends plain edits and remote deletes, which Signal honours only from the author. */
   private ownMessage(threadId: string, messageId: string, action: "edit" | "delete"): { conversation: SignalThreadId; timestamp: number } {
     const { conversation, message } = this.messageIn(threadId, messageId);
     if (message.authorAci !== this._botUserId) {
@@ -429,19 +439,34 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     // The receive loop does not wait for this before the next event: one slow handler must not
     // hold up other Conversations, and Chat's concurrency strategies need to see overlapping
     // messages. Chat logs handler failures itself; the catch keeps them from being logged twice.
-    // A failed handler still advances the receive cursor: replaying it would hit Chat's dedupe,
-    // and retrying it forever would block the cursor.
+    // A failed handler still advances the receive cursor: retrying it forever would block the
+    // cursor. A replayed message hits Chat's dedupe; reactions have none, so one whose handler
+    // was still running at a crash can reach onReaction again.
     if (message && this.chat) {
       await this.chat.processMessage(this, message.threadId, message).catch(() => {});
     } else if (reaction && this.chat) {
-      await Promise.resolve(this.chat.processReaction({ ...reaction, adapter: this })).catch(() => {});
+      // A reaction to an edit of the bot's message is reported on the message Chat knows.
+      const revised = await this.chat.getState().get<string>(this.editKey(reaction.messageId));
+      const reacted = { ...reaction, messageId: revised ?? reaction.messageId, adapter: this };
+      await Promise.resolve(this.chat.processReaction(reacted)).catch(() => {});
     } else {
       this.logger?.debug("Ignoring Signal envelope outside the supported message types");
     }
   }
+
+  /** State key naming the message a Bot Account edit (by its own ID) revises. */
+  private editKey(editId: string): string {
+    return `signal:edit:${this.account}:${editId}`;
+  }
 }
 
 const MIN_VERSION_PARTS = MIN_SIGNAL_CLI_VERSION.split(".").map(Number);
+
+/**
+ * How long the adapter remembers which message an edit revises. Reactions can come
+ * long after an edit; one to an edit older than this reports the edit's own ID.
+ */
+const EDIT_TARGET_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 function parseVersion(version: string): readonly number[] | undefined {
   return /^(\d+)\.(\d+)\.(\d+)/.exec(version)?.slice(1).map(Number);

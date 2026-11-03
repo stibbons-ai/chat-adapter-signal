@@ -1,6 +1,6 @@
 import { defaultEmojiResolver, Message, type Author, type ReactionEvent } from "chat";
 import type { SignalFormatConverter } from "./format.js";
-import { encodeMessageId, encodeThreadId, isAci, isGroupId } from "./thread-id.js";
+import { encodeMessageId, encodeThreadId, isAci, isGroupId, isMessageTimestamp } from "./thread-id.js";
 
 /**
  * The subset of signal-cli's receive envelope (`JsonMessageEnvelope` in
@@ -62,7 +62,7 @@ export function parseTextMessage(
   if (
     !isAci(aci) ||
     !data ||
-    !Number.isSafeInteger(data.timestamp) ||
+    !isMessageTimestamp(data.timestamp) ||
     typeof data.message !== "string" ||
     data.reaction ||
     data.remoteDelete ||
@@ -95,7 +95,7 @@ export function parseTextMessage(
   });
 }
 
-/** A reaction as `Chat.processReaction` takes it, without the adapter. */
+/** A reaction as `Chat.processReaction` takes it, without the adapter and thread, which Chat fills in. */
 export type SignalReaction = Omit<ReactionEvent<SignalRawMessage>, "adapter" | "thread">;
 
 /**
@@ -115,8 +115,8 @@ export function parseReaction(envelope: SignalEnvelope, botAci: string | undefin
     typeof reaction.emoji !== "string" ||
     !reaction.emoji ||
     !isAci(reaction.targetAuthorUuid) ||
-    typeof reaction.targetSentTimestamp !== "number" ||
-    !Number.isSafeInteger(reaction.targetSentTimestamp)
+    !isMessageTimestamp(reaction.targetSentTimestamp) ||
+    typeof reaction.isRemove !== "boolean"
   ) {
     return null;
   }
@@ -129,7 +129,7 @@ export function parseReaction(envelope: SignalEnvelope, botAci: string | undefin
     messageId: encodeMessageId(reaction.targetAuthorUuid, reaction.targetSentTimestamp),
     emoji: defaultEmojiResolver.fromGChat(reaction.emoji),
     rawEmoji: reaction.emoji,
-    added: reaction.isRemove !== true,
+    added: !reaction.isRemove,
     user: authorOf(envelope, aci, botAci),
     raw: envelope,
   };

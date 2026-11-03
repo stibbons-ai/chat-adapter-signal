@@ -44,19 +44,19 @@ async function reactionBot() {
 }
 
 describe("editMessage", () => {
-  it("sends the edit with editTimestamp of the original message, and later edits still target the original", async () => {
+  it("sends each edit with editTimestamp of the original message, which keeps its ID", async () => {
     const { fake, chat } = await bot();
+    // The fake answers each send with the next timestamp from 1_700_000_000_000.
     const sent = await chat.thread(ALICE_DM).post("helo");
-    const [, originalTimestamp] = sent.id.split(/:(?=\d+$)/);
 
     const edited = await sent.edit("hello");
-    await edited.edit("hello!");
+    const editedAgain = await edited.edit("hello!");
 
-    expect(edited.id).toBe(sent.id);
+    expect([sent.id, edited.id, editedAgain.id]).toEqual(Array(3).fill(`${BOT_ACI}:1700000000000`));
     expect(fake.rpcRequests("send").map((request) => request.params)).toEqual([
       { account: BOT_ACCOUNT, recipient: [ALICE_ACI], message: "helo" },
-      { account: BOT_ACCOUNT, recipient: [ALICE_ACI], message: "hello", editTimestamp: Number(originalTimestamp) },
-      { account: BOT_ACCOUNT, recipient: [ALICE_ACI], message: "hello!", editTimestamp: Number(originalTimestamp) },
+      { account: BOT_ACCOUNT, recipient: [ALICE_ACI], message: "hello", editTimestamp: 1_700_000_000_000 },
+      { account: BOT_ACCOUNT, recipient: [ALICE_ACI], message: "hello!", editTimestamp: 1_700_000_000_000 },
     ]);
   });
 
@@ -78,27 +78,27 @@ describe("deleteMessage", () => {
   it("remotely deletes the bot's own message in a 1:1 Conversation and in a Group", async () => {
     const { fake, chat, adapter } = await bot();
     const sent = await chat.thread(ALICE_DM).post("oops");
-    const [, timestamp] = sent.id.split(/:(?=\d+$)/);
 
     await sent.delete();
     await adapter.deleteMessage(GROUP_THREAD, `${BOT_ACI}:1700000000777`);
 
     expect(fake.rpcRequests("remoteDelete").map((request) => request.params)).toEqual([
-      { account: BOT_ACCOUNT, recipient: [ALICE_ACI], targetTimestamp: Number(timestamp) },
+      { account: BOT_ACCOUNT, recipient: [ALICE_ACI], targetTimestamp: 1_700_000_000_000 },
       { account: BOT_ACCOUNT, groupId: GROUP_ID, targetTimestamp: 1_700_000_000_777 },
     ]);
   });
 });
 
 describe("edit and delete of other messages", () => {
-  it("rejects someone else's message, a message from outside the 1:1 Conversation, and malformed IDs without calling signal-cli", async () => {
+  it("rejects someone else's message, a message from outside the 1:1 Conversation, malformed IDs and empty emoji without calling signal-cli", async () => {
     const { fake, adapter } = await bot();
     const before = fake.requests.length;
 
-    const attempts = [
-      () => adapter.editMessage(ALICE_DM, `${ALICE_ACI}:1700000000001`, "x"),
-      () => adapter.deleteMessage(GROUP_THREAD, `${ALICE_ACI}:1700000000001`),
-      () => adapter.addReaction(ALICE_DM, `${BOB_ACI}:1700000000001`, emoji.thumbs_up),
+    const attempts: Array<[string, () => Promise<unknown>]> = [
+      ["edit of Alice's message", () => adapter.editMessage(ALICE_DM, `${ALICE_ACI}:1700000000001`, "x")],
+      ["delete of Alice's message in a Group", () => adapter.deleteMessage(GROUP_THREAD, `${ALICE_ACI}:1700000000001`)],
+      ["reaction to Bob's message in Alice's 1:1", () => adapter.addReaction(ALICE_DM, `${BOB_ACI}:1700000000001`, emoji.thumbs_up)],
+      ["read receipt for Bob's message in Alice's 1:1", () => adapter.markAsRead(ALICE_DM, `${BOB_ACI}:1700000000001`)],
       ...[
         "1700000000001",
         `${BOT_ACI}:`,
@@ -106,14 +106,19 @@ describe("edit and delete of other messages", () => {
         `${BOT_ACI}:01700000000001`,
         `${BOT_ACI}:1.5`,
         `${BOT_ACI}:0`,
+        `${BOT_ACI}:-5`,
+        ` ${BOT_ACI}:1700000000001`,
         `${BOT_ACI.replaceAll("-", "")}:1700000000001`,
+        `${ALICE_ACI.toUpperCase()}:1700000000001`,
         `${BOT_ACI}:99999999999999999999`,
-      ].map((messageId) => () => adapter.deleteMessage(ALICE_DM, messageId)),
-      () => adapter.markAsRead(ALICE_DM, `${BOT_ACI}:1700000000001`),
-      () => adapter.editMessage("signal:dm:not-an-aci", `${BOT_ACI}:1700000000001`, "x"),
+      ].map((messageId): [string, () => Promise<unknown>] => [`delete of ${JSON.stringify(messageId)}`, () => adapter.deleteMessage(ALICE_DM, messageId)]),
+      ["read receipt for the bot's own message", () => adapter.markAsRead(ALICE_DM, `${BOT_ACI}:1700000000001`)],
+      ["edit in an invalid thread", () => adapter.editMessage("signal:dm:not-an-aci", `${BOT_ACI}:1700000000001`, "x")],
+      ["empty emoji", () => adapter.addReaction(ALICE_DM, `${ALICE_ACI}:1700000000001`, "")],
+      ["blank emoji", () => adapter.removeReaction(ALICE_DM, `${ALICE_ACI}:1700000000001`, " ")],
     ];
-    for (const attempt of attempts) {
-      await expect(attempt()).rejects.toBeInstanceOf(ValidationError);
+    for (const [label, attempt] of attempts) {
+      await expect(attempt(), label).rejects.toBeInstanceOf(ValidationError);
     }
 
     expect(fake.requests.slice(before)).toEqual([]);
@@ -121,16 +126,20 @@ describe("edit and delete of other messages", () => {
 });
 
 describe("addReaction and removeReaction", () => {
-  it("react to a received message, targeting its author and timestamp", async () => {
+  it("react to a received message and to the bot's own message in a 1:1 Conversation, targeting author and timestamp", async () => {
     const { fake, adapter, nextDirectMessage } = await bot();
     fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "ship it?", timestamp: 1_700_000_000_123 }));
     const { thread, message } = await nextDirectMessage();
 
     await adapter.addReaction(thread.id, message.id, emoji.thumbs_up);
+    await adapter.addReaction(thread.id, message.id, "thumbs_up");
     await adapter.addReaction(thread.id, message.id, "🦀");
     await adapter.removeReaction(thread.id, message.id, "🦀");
+    const sent = await thread.post("shipping");
+    await sent.addReaction(emoji.rocket);
 
     expect(fake.rpcRequests("sendReaction").map((request) => request.params)).toEqual([
+      { account: BOT_ACCOUNT, recipient: [ALICE_ACI], emoji: "👍", targetAuthor: ALICE_ACI, targetTimestamp: 1_700_000_000_123 },
       { account: BOT_ACCOUNT, recipient: [ALICE_ACI], emoji: "👍", targetAuthor: ALICE_ACI, targetTimestamp: 1_700_000_000_123 },
       { account: BOT_ACCOUNT, recipient: [ALICE_ACI], emoji: "🦀", targetAuthor: ALICE_ACI, targetTimestamp: 1_700_000_000_123 },
       {
@@ -141,13 +150,14 @@ describe("addReaction and removeReaction", () => {
         targetTimestamp: 1_700_000_000_123,
         remove: true,
       },
+      // The fake numbered the four reactions 1_700_000_000_000-003, so the post got 004.
+      { account: BOT_ACCOUNT, recipient: [ALICE_ACI], emoji: "🚀", targetAuthor: BOT_ACI, targetTimestamp: 1_700_000_000_004 },
     ]);
   });
 
   it("react in a Group, to another member's message and to the bot's own", async () => {
     const { fake, chat } = await bot();
     const sent = await chat.thread(GROUP_THREAD).post("status: building");
-    const [, botTimestamp] = sent.id.split(/:(?=\d+$)/);
 
     await chat.getAdapter("signal").addReaction(GROUP_THREAD, `${BOB_ACI}:1700000000999`, emoji.heart);
     await sent.addReaction(emoji.check);
@@ -155,13 +165,13 @@ describe("addReaction and removeReaction", () => {
 
     expect(fake.rpcRequests("sendReaction").map((request) => request.params)).toEqual([
       { account: BOT_ACCOUNT, groupId: GROUP_ID, emoji: "❤️", targetAuthor: BOB_ACI, targetTimestamp: 1_700_000_000_999 },
-      { account: BOT_ACCOUNT, groupId: GROUP_ID, emoji: "✅", targetAuthor: BOT_ACI, targetTimestamp: Number(botTimestamp) },
+      { account: BOT_ACCOUNT, groupId: GROUP_ID, emoji: "✅", targetAuthor: BOT_ACI, targetTimestamp: 1_700_000_000_000 },
       {
         account: BOT_ACCOUNT,
         groupId: GROUP_ID,
         emoji: "✅",
         targetAuthor: BOT_ACI,
-        targetTimestamp: Number(botTimestamp),
+        targetTimestamp: 1_700_000_000_000,
         remove: true,
       },
     ]);
@@ -254,7 +264,11 @@ describe("inbound reactions", () => {
     );
     fake.injectEnvelope(withReaction({ emoji: "" }));
     fake.injectEnvelope(withReaction({ targetAuthorUuid: null }));
-    fake.injectEnvelope(withReaction({ targetSentTimestamp: "1700000000444" }));
+    for (const targetSentTimestamp of ["1700000000444", 0, -5, 1.5, 2 ** 53]) {
+      fake.injectEnvelope(withReaction({ targetSentTimestamp }));
+    }
+    fake.injectEnvelope(withReaction({ isRemove: "true" }));
+    fake.injectEnvelope(withReaction({ isRemove: undefined }));
     const { dataMessage, ...withoutData } = valid;
     fake.injectEnvelope({ ...withoutData, sourceUuid: BOT_ACI, syncMessage: { sentMessage: { ...dataMessage, destinationUuid: ALICE_ACI } } });
     // The bot's own reaction, should signal-cli ever deliver one as a data message.
@@ -323,34 +337,35 @@ it("deploy bot: read receipt, reactions, edit and retract, driven by a user's me
     await thread.markAsRead();
     await signal.addReaction(thread.id, message.id, emoji.eyes);
     const status = await thread.post("deploying…");
-    statusId = status.id;
-    await status.edit("deployed");
+    statusId = (await status.edit("deployed")).id;
     await signal.addReaction(thread.id, message.id, emoji.check);
     done++;
   });
   chat.onReaction([emoji.thumbs_down], async (event) => {
-    await event.adapter.deleteMessage(event.threadId, event.messageId);
+    if (event.messageId === statusId) {
+      await event.adapter.deleteMessage(event.threadId, event.messageId);
+    }
     done++;
   });
   await chat.initialize();
   const startup = fake.requests.length;
 
+  // The fake numbers what the bot sends from 1_700_000_000_000: receipt, 👀, post (002), edit (003), ✅.
   fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "deploy", timestamp: 1_700_000_000_300 }));
   await expect.poll(() => done).toBe(1);
-  const [author, statusTimestamp] = statusId.split(/:(?=\d+$)/) as [string, string];
-  // A 👍 on the status line is not a 👎 handler's business; the 👎 retracts it.
+  // Alice's client reacts to the edited status line by the edit's timestamp; 👍 is not the 👎 handler's business.
   for (const reaction of ["👍", "👎"]) {
-    fake.injectEnvelope(reactionEnvelope({ aci: ALICE_ACI, emoji: reaction, targetAuthor: author, targetTimestamp: Number(statusTimestamp) }));
+    fake.injectEnvelope(reactionEnvelope({ aci: ALICE_ACI, emoji: reaction, targetAuthor: BOT_ACI, targetTimestamp: 1_700_000_000_003 }));
   }
   await expect.poll(() => done).toBe(2);
 
-  expect(author).toBe(BOT_ACI);
+  expect(statusId).toBe(`${BOT_ACI}:1700000000002`);
   expect(fake.requests.slice(startup).flatMap(({ body }) => (body ? [[body.method, body.params]] : []))).toEqual([
     ["sendReceipt", { account: BOT_ACCOUNT, recipient: ALICE_ACI, targetTimestamp: [1_700_000_000_300], type: "read" }],
     ["sendReaction", { account: BOT_ACCOUNT, recipient: [ALICE_ACI], emoji: "👀", targetAuthor: ALICE_ACI, targetTimestamp: 1_700_000_000_300 }],
     ["send", { account: BOT_ACCOUNT, recipient: [ALICE_ACI], message: "deploying…" }],
-    ["send", { account: BOT_ACCOUNT, recipient: [ALICE_ACI], message: "deployed", editTimestamp: Number(statusTimestamp) }],
+    ["send", { account: BOT_ACCOUNT, recipient: [ALICE_ACI], message: "deployed", editTimestamp: 1_700_000_000_002 }],
     ["sendReaction", { account: BOT_ACCOUNT, recipient: [ALICE_ACI], emoji: "✅", targetAuthor: ALICE_ACI, targetTimestamp: 1_700_000_000_300 }],
-    ["remoteDelete", { account: BOT_ACCOUNT, recipient: [ALICE_ACI], targetTimestamp: Number(statusTimestamp) }],
+    ["remoteDelete", { account: BOT_ACCOUNT, recipient: [ALICE_ACI], targetTimestamp: 1_700_000_000_002 }],
   ]);
 });

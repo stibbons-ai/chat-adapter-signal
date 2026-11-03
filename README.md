@@ -168,14 +168,18 @@ edits, remote deletes, receipts, typing indicators, story replies, and legacy-gr
 ## Message actions
 
 - `editMessage` and `deleteMessage` (also `sent.edit()`, `sent.delete()`) work on the Bot Account's own
-  messages only; anything else is a `ValidationError`. An edited message keeps its original ID, and
-  later edits target the original. Signal clients accept edits for a limited time (24 hours when sending)
-  and show the message as edited.
+  messages only; anything else is a `ValidationError`. An edited message keeps its ID. Signal clients
+  react to an edited message by the edit's timestamp; the adapter remembers each edit for 30 days in
+  the Chat state adapter and reports such reactions with the message's ID.
+  Signal clients show edited messages as edited and limit edits and remote deletes by message age
+  (24 hours by default, set by Signal) and edits to 10 per message.
 - `addReaction` and `removeReaction` react to any message; Chat SDK emoji (`emoji.thumbs_up`) and
   their names become Unicode, other strings are sent as they are and should be one emoji. Signal keeps
   one reaction per user per message, so a new reaction replaces the bot's previous one.
 - Incoming reactions in 1:1 Conversations and Groups fire `onReaction` with `added`, the normalized
-  `emoji` (`rawEmoji` is Signal's Unicode) and the reacted-to `messageId`; reactions to stories are ignored.
+  `emoji` (`rawEmoji` is Signal's Unicode; skin-tone variants such as 👍🏽 match only by `rawEmoji`)
+  and the reacted-to `messageId`; reactions to stories are ignored. Chat does not deduplicate
+  reactions: one whose handler was still running when the Host App stopped can arrive again.
 - `thread.markAsRead()` sends a read receipt to the message's author (in a Group, only the author
   sees it); not for the Bot Account's own messages.
 

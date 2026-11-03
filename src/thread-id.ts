@@ -75,6 +75,11 @@ export function encodeMessageId(authorAci: string, timestamp: number): string {
   return `${authorAci}:${timestamp}`;
 }
 
+/** A Signal message timestamp: positive milliseconds since the epoch, exactly representable. */
+export function isMessageTimestamp(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
 /** The message a Message ID names: its author's ACI and its Signal timestamp. */
 export interface SignalMessageId {
   authorAci: string;
@@ -87,7 +92,7 @@ export function decodeMessageId(messageId: string): SignalMessageId {
     const authorAci = messageId.slice(0, separator);
     const timestamp = Number(messageId.slice(separator + 1));
     // Only the exact form encodeMessageId produces, so every message has exactly one ID.
-    if (isAci(authorAci) && Number.isSafeInteger(timestamp) && timestamp > 0 && encodeMessageId(authorAci, timestamp) === messageId) {
+    if (isAci(authorAci) && isMessageTimestamp(timestamp) && encodeMessageId(authorAci, timestamp) === messageId) {
       return { authorAci, timestamp };
     }
   }
