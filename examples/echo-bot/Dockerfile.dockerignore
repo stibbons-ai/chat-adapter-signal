@@ -1,0 +1,10 @@
+*
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.build.json
+!README.md
+!LICENSE
+!src/
+!examples/echo-bot/package.json
+!examples/echo-bot/bot.ts

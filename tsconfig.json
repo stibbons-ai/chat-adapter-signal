@@ -15,7 +15,10 @@
     "sourceMap": true,
     "rootDir": ".",
     "outDir": "dist",
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "@stibbons/chat-adapter-signal": ["./src/index.ts"]
+    }
   },
-  "include": ["src", "test"]
+  "include": ["src", "test", "examples"]
 }

@@ -1,0 +1,16 @@
+{
+  "name": "signal-echo-bot",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node bot.ts"
+  },
+  "dependencies": {
+    "@chat-adapter/state-memory": "^4.43.0",
+    "@stibbons/chat-adapter-signal": "file:adapter.tgz",
+    "chat": "^4.43.0"
+  }
+}

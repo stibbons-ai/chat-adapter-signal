@@ -1,0 +1,39 @@
+# signal-cli daemon plus an echo-bot Host App. Provision the Bot Account first
+# (README, "Provisioning the Bot Account"), put SIGNAL_ACCOUNT=+<number> into .env, then:
+#   docker compose up -d --build
+name: signal-echo-bot
+
+services:
+  signal-cli:
+    # Community image, pulled from its publisher; this repository publishes no signal-cli image
+    # (ADR-0001). Renovate keeps the tag current.
+    image: registry.gitlab.com/packaging/signal-cli/signal-cli-native:v0-14-9-2
+    # --no-receive-stdout keeps message contents out of the container log.
+    command: daemon --http 0.0.0.0:8080 --receive-mode on-start --no-receive-stdout
+    # No `ports`: the HTTP daemon has no authentication. Only services on this
+    # compose network reach it, at http://signal-cli:8080.
+    volumes:
+      - signal-cli-data:/var/lib/signal-cli
+    tmpfs:
+      - /tmp:exec
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /api/v1/check HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '^HTTP/1.1 200' <&3"]
+      interval: 10s
+      start_period: 30s
+      start_interval: 1s
+    restart: unless-stopped
+
+  echo-bot:
+    build:
+      context: ../..
+      dockerfile: examples/echo-bot/Dockerfile
+    environment:
+      SIGNAL_CLI_URL: http://signal-cli:8080
+      SIGNAL_ACCOUNT: ${SIGNAL_ACCOUNT:-}
+    depends_on:
+      signal-cli:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  signal-cli-data:

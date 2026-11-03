@@ -1,0 +1,12 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Keeps the signal-cli image in the example current: signal-cli releases older than about three months may stop working with Signal's servers.",
+  "enabledManagers": ["docker-compose"],
+  "packageRules": [
+    {
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["registry.gitlab.com/packaging/signal-cli/signal-cli-native"],
+      "versioning": "regex:^v(?<major>\\d+)-(?<minor>\\d+)-(?<patch>\\d+)-(?<build>\\d+)(?:-(?<revision>\\d+))?$"
+    }
+  ]
+}
