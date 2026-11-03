@@ -1,5 +1,5 @@
 import { Actions, Button, Card, CardLink, CardText, Divider, Field, Fields, Image, LinkButton, Section, stringifyMarkdown, Table, type AdapterPostableMessage, type Message } from "chat";
-import { createSignalAdapter } from "../src/index.js";
+import { createSignalAdapter, SignalFormatConverter } from "../src/index.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { ALICE_ACI, BOB_ACI, BOT_ACCOUNT, BOT_ACI, directTextEnvelope, groupTextEnvelope } from "./fake-signal-cli.js";
 import { startBot, type Bot } from "./helpers.js";
@@ -106,6 +106,17 @@ describe("outbound markdown", () => {
     expect(await send({ markdown: "# **Title**\n\n```\n```\n\nend" })).toEqual({ message: "Title\n\nend", textStyle: ["0:5:BOLD"] });
   });
 
+  it("renders task list items with their checkbox state", async () => {
+    expect(await send({ markdown: "- [x] done\n- [ ] todo\n- plain" })).toEqual({ message: "• ☑ done\n• ☐ todo\n• plain" });
+  });
+
+  it("pairs several spoilers in one run, indents under ordered markers, and keeps an undefined reference as text", async () => {
+    expect(await send({ markdown: "||a|| and ||b||\n\n1. a\n   - b\n\n[x][missing]" })).toEqual({
+      message: "a and b\n\n1. a\n   • b\n\n[x][missing]",
+      textStyle: ["0:1:SPOILER", "6:1:SPOILER"],
+    });
+  });
+
   it("sends an mdast AST with styles", async () => {
     const sent = await send({ ast: { type: "root", children: [{ type: "paragraph", children: [{ type: "emphasis", children: [{ type: "text", value: "hi" }] }] }] } });
 
@@ -126,6 +137,23 @@ describe("outbound markdown", () => {
   it("renderFormatted returns the plain Signal text", async () => {
     const { adapter } = await bot();
     expect(adapter.renderFormatted({ type: "root", children: [{ type: "heading", depth: 2, children: [{ type: "text", value: "Hi" }] }] })).toBe("Hi");
+  });
+
+  it("SignalFormatConverter.renderPostable gives the same text as a send, cards included", () => {
+    const converter = new SignalFormatConverter();
+    const card = Card({ title: "T", children: [CardText("hi **x**")] });
+
+    expect(converter.renderPostable(card)).toBe("T\n\nhi x");
+    expect(converter.renderPostable({ markdown: "**b** ||s||" })).toBe("b s");
+  });
+
+  it("echoes a received message's AST back without turning typed `||` into a spoiler", async () => {
+    const { chat, fake, nextDirectMessage } = await bot();
+    fake.injectEnvelope(styledEnvelope("a ||b|| c", [{ style: "BOLD", start: 0, length: 1 }]));
+    const { message } = await nextDirectMessage();
+    await chat.thread(DM).post({ ast: message.formatted });
+
+    expect(fake.rpcRequests("send")[0]?.params).toMatchObject({ message: "a ||b|| c", textStyle: ["0:1:BOLD"] });
   });
 });
 
@@ -268,10 +296,24 @@ describe("inbound text styles", () => {
     ["three line breaks are one paragraph break", "a\n\n\nb", [], "a\n\nb\n"],
     ["a spoiler wraps the styles inside it", "ab cd", [{ style: "SPOILER", start: 0, length: 5 }, { style: "BOLD", start: 3, length: 2 }], "||ab **cd**||\n"],
     ["markdown typed without styles stays literal", "1. a *b*", [], "1\\. a \\*b\\*\n"],
+    ["whole lines of monospace selected with their line break are a code block", "a\nb\nc", [{ style: "MONOSPACE", start: 0, length: 4 }], "```\na\nb\n```\n\nc\n"],
+    ["a style ending inside an emoji takes the whole emoji", "x😀", [{ style: "BOLD", start: 0, length: 2 }], "**x😀**\n"],
+    ["monospace keeps its edge spaces", "a  x  b", [{ style: "MONOSPACE", start: 1, length: 5 }], "a`   x   `b\n"],
+    ["monospace from mid-line over a line break stays inline", "a b\nc", [{ style: "MONOSPACE", start: 2, length: 3 }], "a `b\nc`\n"],
   ])("%s", (_name, text, textStyles, markdown) => {
     const adapter = createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: "http://signal-cli:8080" } });
 
     expect(stringifyMarkdown(adapter.parseMessage(styledEnvelope(text, textStyles)).formatted)).toBe(markdown);
+  });
+
+  it("parse a huge hostile message without overflowing the stack", () => {
+    const adapter = createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: "http://signal-cli:8080" } });
+    const text = "ab ".repeat(100_000);
+    const textStyles = Array.from({ length: 100_000 }, (_, index) => ({ style: index % 2 ? "BOLD" : "ITALIC", start: index * 3, length: 2 }));
+
+    const message = adapter.parseMessage(styledEnvelope(text, textStyles));
+    expect(message.text).toBe(text);
+    expect(stringifyMarkdown(message.formatted).startsWith("*ab* **ab** *ab*")).toBe(true);
   });
 });
 
@@ -333,5 +375,16 @@ describe("inbound mentions", () => {
 
     expect(message.text).toBe(`@${ALICE_ACI} @${BOB_ACI}c d`);
     expect(stringifyMarkdown(message.formatted)).toBe(`@${ALICE_ACI} **@${BOB_ACI}c** d\n`);
+  });
+
+  it("stretch a style ending inside a mention over all of it", () => {
+    const adapter = createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: "http://signal-cli:8080" } });
+    const envelope = styledEnvelope("\uFFFC\uFFFC hi", [{ style: "BOLD", start: 0, length: 1 }]);
+    const message = adapter.parseMessage({
+      ...envelope,
+      dataMessage: { ...envelope.dataMessage, mentions: [{ uuid: BOB_ACI, start: 0, length: 2 }] },
+    });
+
+    expect(stringifyMarkdown(message.formatted)).toBe(`**@${BOB_ACI}** hi\n`);
   });
 });

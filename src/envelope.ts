@@ -98,7 +98,7 @@ export function parseTextMessage(
       mentions.push({
         start: mention.start,
         length: mention.length,
-        text: `@${mention.uuid === botAci ? bot.userName : mention.uuid}`,
+        replacement: `@${mention.uuid === botAci ? bot.userName : mention.uuid}`,
       });
     }
   }

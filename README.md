@@ -175,9 +175,9 @@ Outbound, `{ markdown }`, `{ ast }` and cards are sent as plain text with Signal
 |---|---|
 | `**bold**`, `_italic_`, `~~strike~~` | bold, italic, strikethrough |
 | `` `code` ``, fenced code blocks | monospace (fences dropped) |
-| `\|\|spoiler\|\|` | spoiler; an unpaired `\|\|` stays text |
+| `\|\|spoiler\|\|` | spoiler; an unpaired `\|\|`, or a pair split across `**`/`_` boundaries, stays text (so does `\|\|` in card data) |
 | `# Heading` | bold line |
-| `- item`, `1. item` | `• item`, `1. item` (nested lists indented) |
+| `- item`, `1. item`, `- [x] task` | `• item`, `1. item`, `• ☑ task` (nested lists indented) |
 | `[label](url)`, `<url>` | `label (url)`, `url` |
 | `> quote` | `> quote` |
 | tables | monospace text table |
@@ -189,8 +189,9 @@ A card's `fallbackText`, when set, is sent instead, verbatim.
 
 Inbound, Signal's bold, italic, strikethrough, monospace and spoiler ranges arrive in
 `message.formatted` as the matching markdown nodes (a spoiler as `||text||`, monospace spanning
-whole lines as a code block). `message.text` is the text as sent, with mentions resolved. Text
-without styles is taken literally: `*stars*` typed on Signal stay stars.
+several whole lines as a code block). `message.text` is the text as sent, with mentions resolved. Text
+without styles is taken literally: `*stars*` and `||bars||` typed on Signal stay as typed, also
+when `message.formatted` is posted back.
 
 ## Errors
 

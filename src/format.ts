@@ -44,7 +44,7 @@ export interface SignalMention {
   start: number;
   length: number;
   /** What the mention reads as in the text, e.g. `@echo-bot`. */
-  text: string;
+  replacement: string;
 }
 
 const SPOILER_MARKER = "||";
@@ -71,6 +71,11 @@ export class SignalFormatConverter extends BaseFormatConverter {
     return this.parseSignal(platformText, [], []).ast;
   }
 
+  /** The text `renderSignal` sends, so every path renders a message the same way. */
+  override renderPostable(message: AdapterPostableMessage): string {
+    return this.renderSignal(message).text;
+  }
+
   /**
    * Renders a postable message. Strings, `{ raw }` and a card's
    * `fallbackText` are sent verbatim; markdown, ASTs and cards get style ranges.
@@ -91,7 +96,13 @@ export class SignalFormatConverter extends BaseFormatConverter {
     if ("card" in message && message.fallbackText) {
       return { text: message.fallbackText, styles: [] };
     }
-    return renderAst(cardToAst("card" in message ? message.card : message));
+    if ("card" in message) {
+      return renderAst(cardToAst(message.card));
+    }
+    if (message.type === "card") {
+      return renderAst(cardToAst(message));
+    }
+    throw new Error("Invalid PostableMessage format");
   }
 
   /**
@@ -240,7 +251,8 @@ function renderBlock(writer: SignalTextWriter, node: Nodes): void {
         if (index > 0) {
           writer.write("\n");
         }
-        const marker = node.ordered ? `${start + index}. ` : "• ";
+        const checkbox = item.checked === true ? "☑ " : item.checked === false ? "☐ " : "";
+        const marker = `${node.ordered ? `${start + index}.` : "•"} ${checkbox}`;
         writer.write(marker);
         writer.indented(" ".repeat(marker.length), () => renderBlocks(writer, item.children, "\n"));
       });
@@ -384,7 +396,7 @@ function renderLink(writer: SignalTextWriter, url: string, children: readonly No
 // ---------------------------------------------------------------------------
 // Cards -> markdown AST
 
-/** Text nodes holding card data (titles, field values, labels): rendered as is, never read as `||` spoilers. */
+/** Text that is data, not markup (card titles, field values, labels; inbound Signal text): never read as `||` spoilers. */
 const LITERAL_TEXT = new WeakSet<Nodes>();
 
 function literal(value: string): Content {
@@ -489,7 +501,7 @@ function resolveMentions(body: string, mentions: readonly SignalMention[]) {
       mapStart[cursor] = mapEnd[cursor] = text.length - (mention.start - cursor);
     }
     const start = text.length;
-    text += mention.text;
+    text += mention.replacement;
     for (; cursor < end; cursor++) {
       mapStart[cursor] = start;
       mapEnd[cursor] = text.length;
@@ -540,12 +552,19 @@ function segment(length: number, ranges: readonly SignalStyleRange[]): Segment[]
  */
 function textToBlocks(text: string, ranges: readonly SignalStyleRange[]): Content[] {
   const segments = segment(text.length, ranges);
-  const codeBlocks = monospaceRuns(segments).filter(
-    ({ start, end }) =>
-      (start === 0 || text[start - 1] === "\n") &&
-      (end === text.length || text[end] === "\n") &&
-      text.slice(start, end).includes("\n"),
-  );
+  const codeBlocks = monospaceRuns(segments)
+    .map(({ start, end }) => {
+      // A selection of whole lines often takes the line break after (or before) them too.
+      while (start < end && text[start] === "\n") start++;
+      while (end > start && text[end - 1] === "\n") end--;
+      return { start, end };
+    })
+    .filter(
+      ({ start, end }) =>
+        (start === 0 || text[start - 1] === "\n") &&
+        (end === text.length || text[end] === "\n") &&
+        text.slice(start, end).includes("\n"),
+    );
 
   const blocks: Content[] = [];
   // Paragraphs come in order, so the first segment a paragraph needs never lies before the previous one's.
@@ -608,6 +627,10 @@ function inlines(pieces: readonly Piece[], depth: number): Content[] {
     return pieces.flatMap((piece) => textWithBreaks(piece.value));
   }
   const nodes: Content[] = [];
+  // Appended one by one, not push(...): a long hostile message must not overflow the argument stack.
+  const append = (more: readonly Content[]) => {
+    for (const node of more) nodes.push(node);
+  };
   let index = 0;
   while (index < pieces.length) {
     const styled = pieces[index]!.styles.has(style);
@@ -616,11 +639,11 @@ function inlines(pieces: readonly Piece[], depth: number): Content[] {
     const run = pieces.slice(index, end);
     index = end;
     if (!styled) {
-      nodes.push(...inlines(run, depth + 1));
+      append(inlines(run, depth + 1));
     } else if (style === "MONOSPACE") {
       nodes.push(inlineCode(run.map((piece) => piece.value).join("")));
     } else if (style === "SPOILER") {
-      nodes.push(text(SPOILER_MARKER), ...inlines(run, depth + 1), text(SPOILER_MARKER));
+      append([text(SPOILER_MARKER), ...inlines(run, depth + 1), text(SPOILER_MARKER)]);
     } else {
       const node = style === "BOLD" ? strong : style === "ITALIC" ? emphasis : strikethrough;
       nodes.push(node(inlines(run, depth + 1)));
@@ -629,6 +652,9 @@ function inlines(pieces: readonly Piece[], depth: number): Content[] {
   return nodes;
 }
 
+/** Inbound text is literal: a `||` typed without a spoiler style stays `||` when the AST is posted back. */
 function textWithBreaks(value: string): Content[] {
-  return value.split("\n").flatMap((line, index): Content[] => [...(index > 0 ? [BREAK] : []), ...(line ? [text(line)] : [])]);
+  return value
+    .split("\n")
+    .flatMap((line, index): Content[] => [...(index > 0 ? [BREAK] : []), ...(line ? [literal(line)] : [])]);
 }
