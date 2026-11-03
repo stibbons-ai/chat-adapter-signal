@@ -185,7 +185,7 @@ Outbound, `{ markdown }`, `{ ast }` and cards are sent as plain text with Signal
 A plain string or `{ raw }` is sent verbatim, without styles. Cards render as formatted text: bold
 title, subtitle, text (as markdown), bold field labels, links and link buttons as URLs, tables as
 monospace; other buttons and selects are dropped, as Signal has no interactive elements.
-`fallbackText` is not used, since the card itself renders.
+A card's `fallbackText`, when set, is sent instead, verbatim.
 
 Inbound, Signal's bold, italic, strikethrough, monospace and spoiler ranges arrive in
 `message.formatted` as the matching markdown nodes (a spoiler as `||text||`, monospace spanning

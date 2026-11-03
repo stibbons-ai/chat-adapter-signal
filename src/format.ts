@@ -14,6 +14,7 @@ import {
   tableElementToAscii,
   tableToAscii,
   text,
+  toPlainText,
   type AdapterPostableMessage,
   type CardChild,
   type CardElement,
@@ -60,6 +61,7 @@ const PARAGRAPH_BREAK = /\n{2,}/g;
  * nodes and mentions readable text.
  */
 export class SignalFormatConverter extends BaseFormatConverter {
+  /** The plain text only: style ranges need `renderSignal`, as a string cannot carry them. */
   fromAst(ast: Root): string {
     return renderAst(ast).text;
   }
@@ -70,8 +72,8 @@ export class SignalFormatConverter extends BaseFormatConverter {
   }
 
   /**
-   * Renders a postable message. Strings and `{ raw }` are sent verbatim;
-   * markdown, ASTs and cards get style ranges.
+   * Renders a postable message. Strings, `{ raw }` and a card's
+   * `fallbackText` are sent verbatim; markdown, ASTs and cards get style ranges.
    */
   renderSignal(message: AdapterPostableMessage): SignalText {
     if (typeof message === "string") {
@@ -86,14 +88,17 @@ export class SignalFormatConverter extends BaseFormatConverter {
     if ("ast" in message) {
       return renderAst(message.ast);
     }
-    // Signal shows no cards, but renders the card itself better than its plain `fallbackText`.
+    if ("card" in message && message.fallbackText) {
+      return { text: message.fallbackText, styles: [] };
+    }
     return renderAst(cardToAst("card" in message ? message.card : message));
   }
 
   /**
    * Parses an inbound Signal body. `text` is the body with each mention
    * replaced by its readable text; `ast` additionally carries the style ranges
-   * as markdown. Out-of-range, overlapping or unknown entries are skipped.
+   * as markdown. Out-of-range ranges are clipped or skipped, as are
+   * overlapping or out-of-range mentions; overlapping ranges nest.
    */
   parseSignal(
     body: string,
@@ -103,10 +108,23 @@ export class SignalFormatConverter extends BaseFormatConverter {
     const { text, mapStart, mapEnd } = resolveMentions(body, mentions);
     const ranges: SignalStyleRange[] = [];
     for (const range of styles) {
-      const end = Math.min(range.start + range.length, body.length);
-      if (range.start >= 0 && range.start < end) {
-        const start = mapStart[range.start]!;
-        ranges.push({ style: range.style, start, length: mapEnd[end]! - start });
+      let start = range.start;
+      let end = Math.min(range.start + range.length, body.length);
+      // A range must not split an emoji or other surrogate pair: widen it to whole characters.
+      if (isLowSurrogate(body, start)) start--;
+      if (isLowSurrogate(body, end)) end++;
+      if (start < 0 || start >= end) {
+        continue;
+      }
+      start = mapStart[start]!;
+      end = mapEnd[end]!;
+      // Clients style a selection's edge spaces too; markdown can't express those (`** a**` is no emphasis).
+      if (range.style !== "MONOSPACE") {
+        while (start < end && /\s/.test(text[start]!)) start++;
+        while (end > start && /\s/.test(text[end - 1]!)) end--;
+      }
+      if (start < end) {
+        ranges.push({ style: range.style, start, length: end - start });
       }
     }
     return { text, ast: root(textToBlocks(text, ranges)) };
@@ -117,6 +135,11 @@ export function isSignalStyle(value: unknown): value is SignalStyle {
   return (SIGNAL_STYLES as readonly unknown[]).includes(value);
 }
 
+function isLowSurrogate(value: string, index: number): boolean {
+  const code = value.charCodeAt(index);
+  return code >= 0xdc00 && code <= 0xdfff && index > 0;
+}
+
 // ---------------------------------------------------------------------------
 // Outbound: markdown AST -> text + style ranges
 
@@ -125,6 +148,13 @@ class SignalTextWriter {
   readonly styles: SignalStyleRange[] = [];
   /** Written after every line break: list indentation and block quote markers. */
   private linePrefix = "";
+
+  /** Resolves reference-style links and images: identifier -> URL. */
+  readonly definitions: ReadonlyMap<string, string>;
+
+  constructor(definitions: ReadonlyMap<string, string>) {
+    this.definitions = definitions;
+  }
 
   write(value: string): void {
     const lines = value.split("\n");
@@ -137,8 +167,11 @@ class SignalTextWriter {
   styled(style: SignalStyle, render: () => void): void {
     const start = this.text.length;
     render();
-    if (this.text.length > start) {
-      this.styles.push({ style, start, length: this.text.length - start });
+    const length = this.text.length - start;
+    const inner = this.styles.at(-1);
+    // `# **Title**` styles the same text bold twice; one range is enough.
+    if (length > 0 && !(inner?.style === style && inner.start === start && inner.length === length)) {
+      this.styles.push({ style, start, length });
     }
   }
 
@@ -151,7 +184,18 @@ class SignalTextWriter {
 }
 
 function renderAst(ast: Root): SignalText {
-  const writer = new SignalTextWriter();
+  const definitions = new Map<string, string>();
+  const collect = (nodes: readonly Nodes[]) => {
+    for (const node of nodes) {
+      if (node.type === "definition") {
+        definitions.set(node.identifier, node.url);
+      } else if ("children" in node) {
+        collect(node.children);
+      }
+    }
+  };
+  collect(ast.children);
+  const writer = new SignalTextWriter(definitions);
   renderBlocks(writer, ast.children, "\n\n");
   return { text: writer.text, styles: writer.styles };
 }
@@ -159,15 +203,22 @@ function renderAst(ast: Root): SignalText {
 function renderBlocks(writer: SignalTextWriter, nodes: readonly Nodes[], separator: string): void {
   let first = true;
   for (const node of nodes) {
-    // Link reference definitions and the like render nothing; they must not leave a blank line.
-    if (node.type === "definition" || node.type === "footnoteDefinition" || node.type === "yaml") {
+    // Link reference definitions render nothing; they must not leave a blank line.
+    if (node.type === "definition" || node.type === "yaml") {
       continue;
     }
+    const before = writer.text.length;
     if (!first) {
       writer.write(separator);
     }
-    first = false;
+    const start = writer.text.length;
     renderBlock(writer, node);
+    if (writer.text.length === start) {
+      // An empty block (an empty code block, say) takes its separator back.
+      writer.text = writer.text.slice(0, before);
+    } else {
+      first = false;
+    }
   }
 }
 
@@ -201,6 +252,10 @@ function renderBlock(writer: SignalTextWriter, node: Nodes): void {
     case "thematicBreak":
       writer.write("———");
       return;
+    case "footnoteDefinition":
+      writer.write(`[^${node.label ?? node.identifier}]: `);
+      renderBlocks(writer, node.children, "\n");
+      return;
     default:
       if ("children" in node) {
         renderInlines(writer, node.children);
@@ -213,13 +268,14 @@ function renderBlock(writer: SignalTextWriter, node: Nodes): void {
 /**
  * Renders a run of sibling inline nodes. `||` in their text pairs up into
  * spoilers, first with second, third with fourth; a marker left over, or
- * pairing with nothing between, stays literal text.
+ * pairing with nothing between, stays literal text. Card data (`LITERAL_TEXT`)
+ * is never markup.
  */
 function renderInlines(writer: SignalTextWriter, nodes: readonly Nodes[]): void {
   type Token = Nodes | typeof SPOILER_MARKER;
   const tokens: Token[] = [];
   for (const node of nodes) {
-    if (node.type !== "text" || !node.value.includes(SPOILER_MARKER)) {
+    if (node.type !== "text" || LITERAL_TEXT.has(node) || !node.value.includes(SPOILER_MARKER)) {
       tokens.push(node);
       continue;
     }
@@ -279,19 +335,28 @@ function renderInline(writer: SignalTextWriter, node: Nodes): void {
     case "break":
       writer.write("\n");
       return;
-    case "link": {
-      // Signal links bare URLs itself; a label that differs from the URL keeps the URL after it.
-      const label = node.children.map((child) => ("value" in child ? child.value : "")).join("");
-      if (label === node.url || `mailto:${label}` === node.url) {
-        writer.write(node.url);
-      } else {
+    case "link":
+      renderLink(writer, node.url, node.children);
+      return;
+    case "linkReference": {
+      const url = writer.definitions.get(node.identifier);
+      if (url === undefined) {
         renderInlines(writer, node.children);
-        writer.write(` (${node.url})`);
+      } else {
+        renderLink(writer, url, node.children);
       }
       return;
     }
     case "image":
       writer.write(node.alt ? `${node.alt} (${node.url})` : node.url);
+      return;
+    case "imageReference": {
+      const url = writer.definitions.get(node.identifier);
+      writer.write([node.alt, url && `(${url})`].filter(Boolean).join(" "));
+      return;
+    }
+    case "footnoteReference":
+      writer.write(`[^${node.label ?? node.identifier}]`);
       return;
     default:
       if ("children" in node) {
@@ -302,20 +367,43 @@ function renderInline(writer: SignalTextWriter, node: Nodes): void {
   }
 }
 
+/** Signal links bare URLs itself; a label that differs from the URL keeps the URL after it. */
+function renderLink(writer: SignalTextWriter, url: string, children: readonly Nodes[]): void {
+  const label = toPlainText(root([paragraph(children as Content[])]));
+  if (!label || label === url) {
+    writer.write(url);
+  } else if (`mailto:${label}` === url || `http://${label}` === url) {
+    // A GFM autolinked e-mail address or `www.` link: the text as written.
+    writer.write(label);
+  } else {
+    renderInlines(writer, children);
+    writer.write(` (${url})`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Cards -> markdown AST
+
+/** Text nodes holding card data (titles, field values, labels): rendered as is, never read as `||` spoilers. */
+const LITERAL_TEXT = new WeakSet<Nodes>();
+
+function literal(value: string): Content {
+  const node = text(value);
+  LITERAL_TEXT.add(node);
+  return node;
+}
 
 function cardToAst(card: CardElement): Root {
   const blocks: Content[] = [];
   const header: Content[] = [];
   if (card.title) {
-    header.push(strong([text(card.title)]));
+    header.push(strong([literal(card.title)]));
   }
   if (card.subtitle) {
     if (header.length > 0) {
       header.push(BREAK);
     }
-    header.push(text(card.subtitle));
+    header.push(literal(card.subtitle));
   }
   if (header.length > 0) {
     blocks.push(paragraph(header));
@@ -352,8 +440,8 @@ function cardChildToAst(child: CardChild): Content[] {
         paragraph(
           child.children.flatMap((field, index) => [
             ...(index > 0 ? [BREAK] : []),
-            strong([text(field.label)]),
-            text(`: ${field.value}`),
+            strong([literal(field.label)]),
+            literal(`: ${field.value}`),
           ]),
         ),
       ];
@@ -368,13 +456,13 @@ function cardChildToAst(child: CardChild): Content[] {
       );
     default: {
       const fallback = cardChildToFallbackText(child);
-      return fallback ? [paragraph([text(fallback)])] : [];
+      return fallback ? [paragraph([literal(fallback)])] : [];
     }
   }
 }
 
 function linkParagraph(url: string, label: string): Content {
-  return paragraph([link(url, [text(label)])]);
+  return paragraph([link(url, [literal(label)])]);
 }
 
 // ---------------------------------------------------------------------------

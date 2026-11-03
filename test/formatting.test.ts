@@ -1,4 +1,5 @@
-import { Actions, Button, Card, CardLink, CardText, Divider, Field, Fields, LinkButton, Section, stringifyMarkdown, Table, type AdapterPostableMessage, type Message } from "chat";
+import { Actions, Button, Card, CardLink, CardText, Divider, Field, Fields, Image, LinkButton, Section, stringifyMarkdown, Table, type AdapterPostableMessage, type Message } from "chat";
+import { createSignalAdapter } from "../src/index.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { ALICE_ACI, BOB_ACI, BOT_ACCOUNT, BOT_ACI, directTextEnvelope, groupTextEnvelope } from "./fake-signal-cli.js";
 import { startBot, type Bot } from "./helpers.js";
@@ -68,7 +69,7 @@ describe("outbound markdown", () => {
     expect(sent).toEqual({ message: "Run:\n\nnpm test\n\nnpm run check", textStyle: ["6:23:MONOSPACE"] });
   });
 
-  it("renders headings bold, lists as • and 1. text, and links as plain URLs", async () => {
+  it("renders headings bold, lists as • and 1. text, and links as `label (url)` or the bare URL", async () => {
     const sent = await send({
       markdown: [
         "# Plan",
@@ -89,6 +90,26 @@ describe("outbound markdown", () => {
       ].join("\n\n"),
     );
     expect(covered(sent)).toEqual(["BOLD Plan", "BOLD two"]);
+  });
+
+  it("writes autolinked e-mail addresses and www links as typed, and resolves reference-style links and footnotes", async () => {
+    const sent = await send({
+      markdown: "Mail a@b.example or see www.example.com, [the docs][d] and ![logo][l][^n]\n\n[d]: https://example.com/docs\n[l]: https://example.com/l.png\n\n[^n]: A note.",
+    });
+
+    expect(sent).toEqual({
+      message: "Mail a@b.example or see www.example.com, the docs (https://example.com/docs) and logo (https://example.com/l.png)[^n]\n\n[^n]: A note.",
+    });
+  });
+
+  it("styles a bold heading once and leaves no blank line for an empty code block", async () => {
+    expect(await send({ markdown: "# **Title**\n\n```\n```\n\nend" })).toEqual({ message: "Title\n\nend", textStyle: ["0:5:BOLD"] });
+  });
+
+  it("sends an mdast AST with styles", async () => {
+    const sent = await send({ ast: { type: "root", children: [{ type: "paragraph", children: [{ type: "emphasis", children: [{ type: "text", value: "hi" }] }] }] } });
+
+    expect(sent).toEqual({ message: "hi", textStyle: ["0:2:ITALIC"] });
   });
 
   it("renders a table as monospace text", async () => {
@@ -123,7 +144,7 @@ describe("outbound cards", () => {
       ],
     });
 
-    for (const postable of [card, { card, fallbackText: "Order 42 shipped" }]) {
+    for (const postable of [card, { card }]) {
       const sent = await send(postable);
       expect(sent.message).toBe(
         [
@@ -140,10 +161,45 @@ describe("outbound cards", () => {
       expect(covered(sent)).toEqual(["BOLD Order 🧾 42", "BOLD Alice", "BOLD Status", "BOLD Total", "ITALIC Questions?", "MONOSPACE Item | Qty\n-----|----\nTea  | 2"]);
     }
   });
+
+  it("sends a card's fallbackText verbatim instead, when set", async () => {
+    const card = Card({ title: "Order 42", children: [CardText("**shipped**")] });
+
+    expect(await send({ card, fallbackText: "Order 42 **shipped**" })).toEqual({ message: "Order 42 **shipped**" });
+  });
+
+  it("keeps `||` in card data literal; card text, which is markdown, still has spoilers", async () => {
+    const card = Card({
+      title: "a || b || c",
+      children: [Fields([Field({ label: "x||y||", value: "1 || 2 || 3" })]), CardText("||hidden||")],
+    });
+
+    expect(await send(card)).toEqual({
+      message: "a || b || c\n\nx||y||: 1 || 2 || 3\n\nhidden",
+      textStyle: ["0:11:BOLD", "13:6:BOLD", "34:6:SPOILER"],
+    });
+  });
+
+  it("renders the header image and images as URLs, and bold card text bold, in a Group too", async () => {
+    const { chat, fake } = await bot();
+    const card = Card({
+      title: "T",
+      imageUrl: "https://example.com/h.png",
+      children: [CardText("sale", { style: "bold" }), Image({ url: "https://example.com/i.png", alt: "pic" })],
+    });
+    await chat.thread(`signal:group:${GROUP_ID.replaceAll("=", "")}`).post(card);
+
+    expect(fake.rpcRequests("send")[0]?.params).toEqual({
+      account: BOT_ACCOUNT,
+      groupId: GROUP_ID,
+      message: "T\n\nhttps://example.com/h.png\n\nsale\n\npic (https://example.com/i.png)",
+      textStyle: ["0:1:BOLD", "30:4:BOLD"],
+    });
+  });
 });
 
 /** A 1:1 envelope whose text carries Signal text styles. */
-function styledEnvelope(text: string, textStyles: unknown[]) {
+function styledEnvelope(text: string, textStyles: Array<{ style?: unknown; start?: unknown; length?: unknown } | null>) {
   const envelope = directTextEnvelope({ aci: ALICE_ACI, text });
   return { ...envelope, dataMessage: { ...envelope.dataMessage, textStyles } };
 }
@@ -179,7 +235,7 @@ describe("inbound text styles", () => {
     expect(message.text).toBe("Look:\nhere\n\nnpm test\nnpm run check\n\n**literal**");
   });
 
-  it("skip ranges that are malformed, unknown, or outside the text", async () => {
+  it("skip ranges that are malformed or unknown, and clip those running past the text", async () => {
     const message = await receive(
       styledEnvelope("abc", [
         { style: "BOLD", start: 2, length: 5 },
@@ -193,6 +249,29 @@ describe("inbound text styles", () => {
     );
 
     expect(stringifyMarkdown(message.formatted)).toBe("ab**c**\n");
+  });
+
+  it("move a style's edge spaces outside it and never split an emoji", async () => {
+    const message = await receive(
+      styledEnvelope("say hi 😀 now", [
+        { style: "BOLD", start: 3, length: 4 },
+        { style: "ITALIC", start: 8, length: 1 },
+      ]),
+    );
+
+    expect(stringifyMarkdown(message.formatted)).toBe("say **hi** *😀* now\n");
+  });
+
+  it.each([
+    ["a single whole monospace line stays inline code", "x\nab", [{ style: "MONOSPACE", start: 2, length: 2 }], "x\\\n`ab`\n"],
+    ["monospace over a line break, not whole lines, stays inline", "a b\nc d", [{ style: "MONOSPACE", start: 2, length: 3 }], "a `b\nc` d\n"],
+    ["three line breaks are one paragraph break", "a\n\n\nb", [], "a\n\nb\n"],
+    ["a spoiler wraps the styles inside it", "ab cd", [{ style: "SPOILER", start: 0, length: 5 }, { style: "BOLD", start: 3, length: 2 }], "||ab **cd**||\n"],
+    ["markdown typed without styles stays literal", "1. a *b*", [], "1\\. a \\*b\\*\n"],
+  ])("%s", (_name, text, textStyles, markdown) => {
+    const adapter = createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: "http://signal-cli:8080" } });
+
+    expect(stringifyMarkdown(adapter.parseMessage(styledEnvelope(text, textStyles)).formatted)).toBe(markdown);
   });
 });
 
@@ -235,5 +314,24 @@ describe("inbound mentions", () => {
     });
 
     expect(message.text).toBe("hi \uFFFC");
+  });
+
+  it("apply in text order, skip one overlapping another, and pull a style starting inside a mention onto all of it", () => {
+    const adapter = createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: "http://signal-cli:8080" } });
+    const envelope = styledEnvelope("\uFFFC \uFFFC\uFFFCc d", [{ style: "BOLD", start: 3, length: 2 }]);
+    const message = adapter.parseMessage({
+      ...envelope,
+      dataMessage: {
+        ...envelope.dataMessage,
+        mentions: [
+          { uuid: BOB_ACI, start: 2, length: 2 },
+          { uuid: ALICE_ACI, start: 3, length: 1 },
+          { uuid: ALICE_ACI, start: 0, length: 1 },
+        ],
+      },
+    });
+
+    expect(message.text).toBe(`@${ALICE_ACI} @${BOB_ACI}c d`);
+    expect(stringifyMarkdown(message.formatted)).toBe(`@${ALICE_ACI} **@${BOB_ACI}c** d\n`);
   });
 });
