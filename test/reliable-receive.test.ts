@@ -167,7 +167,13 @@ describe("reconnect", () => {
 
   it("reconnects when the event stream goes silent without closing (no keep-alives within idleTimeoutMs)", async () => {
     const fake = await startFake();
-    const app = await startHostApp(fake, { config: { transport: { type: "http", url: fake.url, idleTimeoutMs: 50 } } });
+    // Every idleTimeoutMs the stream dies and is replaced, so an event can land on a stream the client is
+    // already aborting. A stored cursor makes each reconnect send Last-Event-ID, so the replay delivers it;
+    // without one, signal-cli replays nothing and the event would be lost.
+    const state = createMemoryState();
+    await state.connect();
+    await state.set(CURSOR_KEY, { lastEventId: fake.lastEventId, processed: [] });
+    const app = await startHostApp(fake, { state, config: { transport: { type: "http", url: fake.url, idleTimeoutMs: 50 } } });
 
     await until(() => eventRequests(fake).length >= 2, "the reconnect after the idle timeout");
     const idleErrors = app.logger.entries.filter(
@@ -175,7 +181,7 @@ describe("reconnect", () => {
     );
     expect(idleErrors.length).toBeGreaterThan(0);
     send(fake, "after idle reconnect");
-    await until(() => app.finished.includes("after idle reconnect"), "a message on the new stream");
+    await until(() => app.finished.includes("after idle reconnect"), "a message after the idle reconnect");
   });
 
   it("retries a reconnect whose event stream request gets no response within idleTimeoutMs", async () => {
