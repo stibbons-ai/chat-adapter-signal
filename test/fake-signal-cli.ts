@@ -103,7 +103,7 @@ export class FakeSignalCli {
       return this.groups.filter((group) => !wanted || wanted.includes(group.id));
     });
     // signal-cli 0.14.9 answers each of these with the sent timestamp and per-recipient results.
-    for (const method of ["send", "remoteDelete", "sendReaction", "sendReceipt"]) {
+    for (const method of ["send", "remoteDelete", "sendReaction", "sendReceipt", "sendTyping"]) {
       this.rpcHandlers.set(method, () => ({ timestamp: this.nextSendTimestamp++, results: [{ type: "SUCCESS" }] }));
     }
   }

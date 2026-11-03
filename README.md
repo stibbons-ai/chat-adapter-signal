@@ -4,9 +4,9 @@ Signal adapter for the [Chat SDK](https://github.com/vercel/chat). It talks to a
 [signal-cli](https://github.com/AsamK/signal-cli) daemon that you install and run
 yourself; this package never bundles, downloads or installs signal-cli or libsignal.
 
-> Early development: 1:1 and Group text messages in and out, with formatting, edits, remote deletes,
-> reactions and read receipts, over signal-cli's HTTP daemon, a Unix socket, TCP, or a spawned
-> signal-cli. Attachments are not supported yet.
+> Early development: 1:1 and Group text messages in and out, with formatting, streamed replies,
+> typing indicators, edits, remote deletes, reactions and read receipts, over signal-cli's HTTP
+> daemon, a Unix socket, TCP, or a spawned signal-cli. Attachments are not supported yet.
 
 ## Requirements
 
@@ -186,6 +186,25 @@ edits, remote deletes, receipts, typing indicators, story replies, and legacy-gr
   user's edited message carries that edit's timestamp in `messageId` (the adapter ignores others' edits).
 - `thread.markAsRead()` sends a read receipt to the message's author (in a Group, only the author
   sees it); not for the Bot Account's own messages.
+
+## Streaming and typing
+
+`thread.startTyping()` shows Signal's typing indicator and re-sends it every 10 seconds (Signal
+clients hide it 15 seconds after the last one) until the bot posts to the Conversation, Chat ends
+it (`endTyping`, which sends Signal's typing STOP), or 2 minutes pass, so a handler that fails
+before replying does not leave the bot typing. Signal shows no status text.
+
+`thread.post(stream)` (an AI SDK text or full stream, or any async iterable of text) shows the typing
+indicator while the stream runs, then sends the whole answer as one markdown message. It never posts
+a draft and edits it: Signal allows 10 edits per message and marks edited messages. A stream that
+fails, or ends without text, sends nothing, stops the indicator, and rejects (`ValidationError` for
+an empty one).
+
+Signal takes up to 64 KiB of UTF-8 text per message (signal-cli sends text over 2000 bytes as a
+long-text attachment that clients show in place of the message, as Signal's apps do). A longer
+post or streamed answer goes out as several messages, split at the last paragraph break that fits
+(else a line break, else a space), each with its own formatting; the first message's ID stands for
+the reply.
 
 ## Formatting
 
