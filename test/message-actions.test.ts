@@ -73,6 +73,20 @@ describe("editMessage", () => {
       editTimestamp: 1_700_000_000_555,
     });
   });
+
+  it("sends a markdown edit as plain text with Signal text styles", async () => {
+    const { fake, adapter } = await bot();
+
+    await adapter.editMessage(ALICE_DM, `${BOT_ACI}:1700000000555`, { markdown: "**now** fixed" });
+
+    expect(fake.rpcRequests("send").at(-1)?.params).toEqual({
+      account: BOT_ACCOUNT,
+      recipient: [ALICE_ACI],
+      message: "now fixed",
+      textStyle: ["0:3:BOLD"],
+      editTimestamp: 1_700_000_000_555,
+    });
+  });
 });
 
 describe("deleteMessage", () => {

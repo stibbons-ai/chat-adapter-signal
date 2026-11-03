@@ -4,9 +4,9 @@ Signal adapter for the [Chat SDK](https://github.com/vercel/chat). It talks to a
 [signal-cli](https://github.com/AsamK/signal-cli) daemon that you install and run
 yourself; this package never bundles, downloads or installs signal-cli or libsignal.
 
-> Early development: 1:1 and Group text messages in and out, edits, remote deletes, reactions and
-> read receipts, over signal-cli's HTTP daemon, a Unix socket, TCP, or a spawned signal-cli.
-> Formatting and attachments are not supported yet.
+> Early development: 1:1 and Group text messages in and out, with formatting, edits, remote deletes,
+> reactions and read receipts, over signal-cli's HTTP daemon, a Unix socket, TCP, or a spawned
+> signal-cli. Attachments are not supported yet.
 
 ## Requirements
 
@@ -159,8 +159,9 @@ are display data only (`author.fullName`).
 Each Group is one Conversation, so `thread.subscribe()` covers all of its messages and `thread.post`
 sends to the whole Group. Every Group message the adapter hands to Chat has `message.isMention` set: `true` for a native Signal
 @mention of the Bot Account or a quote-reply to one of its messages, which fires `onNewMention`;
-`false` otherwise, including when the bot's name only appears as text. The mention itself shows as
-U+FFFC in `message.text` for now.
+`false` otherwise, including when the bot's name only appears as text. In `message.text` a native
+@mention reads `@<userName>` for the Bot Account and `@<ACI>` for anyone else (Signal sends no
+names with mentions).
 
 Not user input, so never handed to Chat: sync messages from the Bot Account's own linked devices,
 edits, remote deletes, receipts, typing indicators, story replies, and legacy-group messages.
@@ -185,6 +186,34 @@ edits, remote deletes, receipts, typing indicators, story replies, and legacy-gr
   user's edited message carries that edit's timestamp in `messageId` (the adapter ignores others' edits).
 - `thread.markAsRead()` sends a read receipt to the message's author (in a Group, only the author
   sees it); not for the Bot Account's own messages.
+
+## Formatting
+
+Signal styles text with separate ranges rather than markup; the adapter converts both ways.
+
+Outbound, `{ markdown }`, `{ ast }` and cards are sent as plain text with Signal text styles:
+
+| Markdown | On Signal |
+|---|---|
+| `**bold**`, `_italic_`, `~~strike~~` | bold, italic, strikethrough |
+| `` `code` ``, fenced code blocks | monospace (fences dropped) |
+| `\|\|spoiler\|\|` | spoiler; an unpaired `\|\|`, or a pair split across `**`/`_` boundaries, stays text (so does `\|\|` in card data) |
+| `# Heading` | bold line |
+| `- item`, `1. item`, `- [x] task` | `• item`, `1. item`, `• ☑ task` (nested lists indented) |
+| `[label](url)`, `<url>` | `label (url)`, `url` |
+| `> quote` | `> quote` |
+| tables | monospace text table |
+
+A plain string or `{ raw }` is sent verbatim, without styles. Cards render as formatted text: bold
+title, subtitle, text (as markdown), bold field labels, links and link buttons as URLs, tables as
+monospace; other buttons and selects are dropped, as Signal has no interactive elements.
+A card's `fallbackText`, when set, is sent instead, verbatim.
+
+Inbound, Signal's bold, italic, strikethrough, monospace and spoiler ranges arrive in
+`message.formatted` as the matching markdown nodes (a spoiler as `||text||`, monospace spanning
+several whole lines as a code block). `message.text` is the text as sent, with mentions resolved. Text
+without styles is taken literally: `*stars*` and `||bars||` typed on Signal stay as typed, also
+when `message.formatted` is posted back.
 
 ## Errors
 

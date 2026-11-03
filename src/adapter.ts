@@ -230,7 +230,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   parseMessage(raw: SignalRawMessage): Message<SignalRawMessage> {
-    const message = "sourceUuid" in raw ? parseTextMessage(raw, this.formatConverter, this._botUserId) : null;
+    const message = "sourceUuid" in raw ? parseTextMessage(raw, this.formatConverter, this.bot) : null;
     if (!message) {
       throw new ValidationError(ADAPTER_NAME, "Only 1:1 and Groups v2 text envelopes can be parsed into messages");
     }
@@ -355,6 +355,11 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     return { aci: self.aci, number: self.number };
   }
 
+  /** What the envelope parser needs of the Bot Account: its ACI once known, and its name for Mentions. */
+  private get bot(): { aci: string | undefined; userName: string } {
+    return { aci: this._botUserId, userName: this._userName };
+  }
+
   private requireBotAci(): string {
     if (!this._botUserId) {
       throw new ValidationError(ADAPTER_NAME, "The Signal adapter is not initialized; call chat.initialize() first");
@@ -364,10 +369,14 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
 
   /** Sends a message (or, with `editTimestamp`, an edit) and returns signal-cli's result with the sent timestamp. */
   private async send(conversation: SignalThreadId, message: AdapterPostableMessage, editTimestamp?: number): Promise<SignalSendResult> {
+    const { text, styles } = this.formatConverter.renderSignal(message);
     const result = await this.transport.request<SignalSendResult | null>("send", {
       account: this.account,
       ...recipientParams(conversation),
-      message: this.formatConverter.renderPostable(message),
+      message: text,
+      ...(styles.length > 0 && {
+        textStyle: styles.map(({ start, length, style }) => `${start}:${length}:${style}`),
+      }),
       ...(editTimestamp === undefined ? {} : { editTimestamp }),
     });
     if (!(result && isMessageTimestamp(result.timestamp))) {
@@ -435,7 +444,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       });
       return;
     }
-    const message = envelope && parseTextMessage(envelope, this.formatConverter, this._botUserId);
+    const message = envelope && parseTextMessage(envelope, this.formatConverter, this.bot);
     const reaction = message ? null : envelope && parseReaction(envelope, this._botUserId);
     // The receive loop does not wait for this before the next event: one slow handler must not
     // hold up other Conversations, and Chat's concurrency strategies need to see overlapping
