@@ -4,8 +4,9 @@ Signal adapter for the [Chat SDK](https://github.com/vercel/chat). It talks to a
 [signal-cli](https://github.com/AsamK/signal-cli) daemon that you install and run
 yourself; this package never bundles, downloads or installs signal-cli or libsignal.
 
-> Early development: 1:1 and Group text messages in and out, over signal-cli's HTTP daemon,
-> a Unix socket, TCP, or a spawned signal-cli. Formatting, reactions and attachments are not supported yet.
+> Early development: 1:1 and Group text messages in and out, edits, remote deletes, reactions and
+> read receipts, over signal-cli's HTTP daemon, a Unix socket, TCP, or a spawned signal-cli.
+> Formatting and attachments are not supported yet.
 
 ## Requirements
 
@@ -108,9 +109,9 @@ daemon's keep-alive interval.
 On the HTTP transport, the adapter stores the ID of the last processed event in Chat's state adapter (key
 `signal:receive-cursor:<account>`) and sends it as `Last-Event-ID` on every reconnect and at
 startup, so signal-cli replays what was received meanwhile. An event counts as processed once
-`chat.processMessage` for it has completed, and the cursor never moves past an event that is
-still running. Replayed events that were already processed, or are still running, are skipped,
-so no handler runs twice for one event.
+Chat has processed it (`chat.processMessage`, or `chat.processReaction` for a reaction), and the
+cursor never moves past an event that is still running. Replayed events that were already
+processed, or are still running, are skipped, so no handler runs twice for one event.
 
 Limits:
 
@@ -120,10 +121,10 @@ Limits:
   `@chat-adapter/state-memory` loses the cursor with the process.
 - With `concurrency: "queue"` or `"debounce"`, `processMessage` completes once the message is
   queued in Chat's state, not when its handler finishes.
-- An event whose handler was cut off by a crash is replayed, but Chat skips it as a duplicate
+- A message whose handler was cut off by a crash is replayed, but Chat skips it as a duplicate
   while its dedupe entry lasts (`dedupeTtlMs`, default 10 minutes): Chat records a message as
-  seen before its handler runs.
-- If `chat.processMessage` fails (the handler throws, or Chat's state store fails before the
+  seen before its handler runs. Chat does not deduplicate reactions, so such a reaction arrives again.
+- If `chat.processMessage` or `chat.processReaction` fails (the handler throws, or Chat's state store fails before the
   handler runs), the event still counts as processed so one bad event cannot stall the stream;
   Chat logs the error.
 - After a fresh start (no stored cursor), there is no ID to resume from until the first event
@@ -162,7 +163,28 @@ sends to the whole Group. Every Group message the adapter hands to Chat has `mes
 U+FFFC in `message.text` for now.
 
 Not user input, so never handed to Chat: sync messages from the Bot Account's own linked devices,
-edits, remote deletes, reactions, receipts, typing indicators, story replies, and legacy-group messages.
+edits, remote deletes, receipts, typing indicators, story replies, and legacy-group messages.
+
+## Message actions
+
+- `editMessage` and `deleteMessage` (also `sent.edit()`, `sent.delete()`) work on the Bot Account's own
+  messages only; anything else is a `ValidationError`. Signal clients show edited messages as edited
+  and limit edits and remote deletes by message age (24 hours by default, set by Signal) and edits
+  to 10 per message.
+- An edited message keeps its ID. Signal clients react to an edited message by the edit's
+  timestamp; the adapter remembers each edit for 30 days in the Chat state adapter (key
+  `signal:edit:<account>:<edit ID>`; persistent only with a persistent state adapter) and reports
+  such reactions with the message's ID.
+- `addReaction` and `removeReaction` react to any message of the Conversation; Chat SDK emoji
+  (`emoji.thumbs_up`) and their names become Unicode, other strings are sent as they are and should
+  be one emoji. Signal keeps one reaction per user per message, so a new reaction replaces the bot's
+  previous one.
+- Incoming reactions in 1:1 Conversations and Groups fire `onReaction` with `added` (true or false),
+  the normalized `emoji` (`rawEmoji` is Signal's Unicode; skin-tone variants such as 👍🏽 match only
+  by `rawEmoji`) and the reacted-to `messageId`; reactions to stories are ignored. A reaction to another
+  user's edited message carries that edit's timestamp in `messageId` (the adapter ignores others' edits).
+- `thread.markAsRead()` sends a read receipt to the message's author (in a Group, only the author
+  sees it); not for the Bot Account's own messages.
 
 ## Errors
 

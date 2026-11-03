@@ -74,3 +74,30 @@ export function decodeThreadId(threadId: string): SignalThreadId {
 export function encodeMessageId(authorAci: string, timestamp: number): string {
   return `${authorAci}:${timestamp}`;
 }
+
+/** A Signal message timestamp: positive milliseconds since the epoch, exactly representable. */
+export function isMessageTimestamp(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+/** The message a Message ID names: its author's ACI and its Signal timestamp. */
+export interface SignalMessageId {
+  authorAci: string;
+  timestamp: number;
+}
+
+export function decodeMessageId(messageId: string): SignalMessageId {
+  if (typeof messageId === "string") {
+    const separator = messageId.lastIndexOf(":");
+    const authorAci = messageId.slice(0, separator);
+    const timestamp = Number(messageId.slice(separator + 1));
+    // Only the exact form encodeMessageId produces, so every message has exactly one ID.
+    if (isAci(authorAci) && isMessageTimestamp(timestamp) && encodeMessageId(authorAci, timestamp) === messageId) {
+      return { authorAci, timestamp };
+    }
+  }
+  throw new ValidationError(
+    ADAPTER_NAME,
+    `Invalid Signal message ID ${JSON.stringify(messageId)}; expected "<author ACI>:<timestamp>"`,
+  );
+}
