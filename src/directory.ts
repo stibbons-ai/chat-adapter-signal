@@ -9,6 +9,7 @@ import type { SignalTransport } from "./transport/types.js";
 export interface SignalContact {
   number?: string | null;
   uuid?: string | null;
+  username?: string | null;
   name?: string | null;
   nickGivenName?: string | null;
   nickFamilyName?: string | null;
@@ -56,8 +57,8 @@ export async function findGroup(transport: SignalTransport, account: string, gro
 
 /**
  * The name signal-cli puts in an envelope's `sourceName` (`getContactOrProfileName`):
- * the nickname, else the contact name, else the profile name; then the number.
- * Empty when signal-cli knows none of them.
+ * the nickname, else the contact name, else the profile name; failing those, the number,
+ * then the username. Empty when signal-cli knows none of them.
  */
 export function contactDisplayName(contact: SignalContact): string {
   return (
@@ -65,6 +66,7 @@ export function contactDisplayName(contact: SignalContact): string {
     contact.name ||
     joinName(contact.profile?.givenName, contact.profile?.familyName) ||
     contact.number ||
+    contact.username ||
     ""
   );
 }

@@ -259,7 +259,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
 
   /**
    * Looks a user up by ACI; `userName` is the ACI, as on message authors. `null` when
-   * signal-cli knows neither a name nor a number for the ACI: it answers any well-formed
+   * signal-cli knows no name, number or username for the ACI: it answers any well-formed
    * ACI, recording a recipient it has not seen before.
    */
   async getUser(userId: string): Promise<UserInfo | null> {
@@ -268,7 +268,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       throw new ValidationError(ADAPTER_NAME, `Invalid Signal user ID ${JSON.stringify(userId)}; expected an ACI`);
     }
     const contact = await findContact(this.transport, this.account, aci);
-    const fullName = contact?.uuid === aci ? contactDisplayName(contact) : undefined;
+    const fullName = contact && contactDisplayName(contact);
     return fullName ? { userId: aci, userName: aci, fullName, isBot: aci === this._botUserId } : null;
   }
 

@@ -180,8 +180,8 @@ needs the state store: a handler still running after `chat.shutdown()` gets an e
 no name) and a Group after its Signal name (`metadata.groupId`, `description`, `members` as ACIs,
 leaving out members signal-cli knows no ACI for); a Group the Bot Account is not or no longer in
 throws `ResourceNotFoundError`. `getUser(aci)` returns `userId` and `userName` as the ACI and
-`fullName` as signal-cli names the sender in messages (nickname, contact name, profile name, then
-phone number), or `null` when signal-cli knows none of these for the ACI.
+`fullName` as signal-cli names the sender in messages (nickname, contact name, profile name), failing
+those the phone number, then the username; `null` when signal-cli knows none of these for the ACI.
 
 `adapter.openDM(user)` takes an ACI, a phone number (`+15550001111`) or `u:<username>` and returns
 `signal:dm:<ACI>`; signal-cli looks numbers and usernames up on the Signal server, and a user it
@@ -203,7 +203,7 @@ signal-cli failures surface as `@chat-adapter/shared` errors (signal-cli JSON-RP
 |---|---|
 | `AuthenticationError` | HTTP 401/403 (e.g. from a reverse proxy), or the daemon does not serve the Bot Account (`-32602` "Specified account does not exist", or the account is missing from `listAccounts`/`listContacts` at startup) |
 | `AdapterRateLimitError` | signal-cli rate-limit error (`-5`), or HTTP 429; `retryAfter` in seconds when known |
-| `ResourceNotFoundError` | The recipient is not registered with Signal (`-1`) |
+| `ResourceNotFoundError` | The recipient is not registered with Signal (`-1`); `openDM` finds no ACI for a number or username; `fetchThread` of a Group the Bot Account is not in |
 | `ValidationError` | Invalid request or parameters (`-32600`, other `-32602`, other `-1` user errors) |
 | `NetworkError` | signal-cli unreachable or not startable, a spawned signal-cli that exited, a dropped socket, other HTTP failures, malformed replies, signal-cli I/O errors (`-3`), or a send where every recipient failed on the network (`-1` with `NETWORK_FAILURE` results) |
 | `AdapterError` with `code` | `UNTRUSTED_IDENTITY` (`-4`), `CAPTCHA_REJECTED` (`-6`), `METHOD_NOT_FOUND` (`-32601`), `SIGNAL_CLI_ERROR` (anything else, e.g. `-32603`); from `initialize()`, `STARTUP_CANCELLED` when `disconnect()` ran during startup |

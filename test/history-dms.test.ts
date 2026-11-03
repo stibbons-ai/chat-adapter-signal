@@ -200,18 +200,20 @@ describe("getUser", () => {
     expect(await adapter.getUser(BOT_ACI)).toMatchObject({ userId: BOT_ACI, isBot: true });
   });
 
-  it("names a user by nickname, then contact name, then profile name, then number, like signal-cli's sourceName", async () => {
+  it("names a user by nickname, contact name, profile name, number, then username", async () => {
     const { fake, adapter } = await echoBot();
     const base = { username: null, name: "", nickGivenName: null, nickFamilyName: null, profile: null };
-    const acis = ["10000000-0000-4000-8000-000000000001", "20000000-0000-4000-8000-000000000002", "30000000-0000-4000-8000-000000000003"];
+    const acis = [1, 2, 3, 4, 5].map((n) => `${n}0000000-0000-4000-8000-00000000000${n}`);
     fake.contacts.push(
-      { ...base, number: null, uuid: acis[0]!, name: "Contact Name", nickGivenName: "Nick", profile: { givenName: "Pro" } },
-      { ...base, number: null, uuid: acis[1]!, name: "Contact Name", profile: { givenName: "Pro", familyName: "File" } },
-      { ...base, number: "+15550003333", uuid: acis[2]!, profile: { givenName: null, familyName: null } },
+      { ...base, number: "+15550003333", uuid: acis[0]!, name: "Contact Name", nickGivenName: "Nick", profile: { givenName: "Pro" } },
+      { ...base, number: "+15550003333", uuid: acis[1]!, name: "Contact Name", profile: { givenName: "Pro", familyName: "File" } },
+      { ...base, number: "+15550003333", uuid: acis[2]!, username: "pro.42", profile: { givenName: null, familyName: "File" } },
+      { ...base, number: "+15550003333", uuid: acis[3]!, username: "num.42", profile: { givenName: null, familyName: null } },
+      { ...base, number: null, uuid: acis[4]!, username: "only.42" },
     );
 
     const names = await Promise.all(acis.map(async (aci) => (await adapter.getUser(aci))?.fullName));
-    expect(names).toEqual(["Nick", "Contact Name", "+15550003333"]);
+    expect(names).toEqual(["Nick", "Contact Name", "File", "+15550003333", "only.42"]);
   });
 
   it("returns null for an ACI signal-cli knows neither a name nor a number for, and rejects anything but an ACI", async () => {
