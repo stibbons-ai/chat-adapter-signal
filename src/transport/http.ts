@@ -11,12 +11,13 @@ import {
   assertTimeoutMs,
   fromJsonRpcError,
   malformedResponse,
+  requestDeadlineMs,
   unreachable,
   withDeadline,
   type JsonRpcErrorObject,
 } from "../errors.js";
 import { parseEventStream } from "./sse.js";
-import type { EventListener, EventSubscription, SignalTransport, SubscribeOptions } from "./types.js";
+import type { EventListener, EventSubscription, RequestOptions, SignalTransport, SubscribeOptions } from "./types.js";
 
 export interface HttpTransportOptions {
   type: "http";
@@ -77,8 +78,9 @@ export class HttpTransport implements SignalTransport {
     }
   }
 
-  request<T>(method: string, params?: Record<string, unknown>): Promise<T> {
-    return withDeadline(`signal-cli JSON-RPC ${method} at ${this.endpoint}`, this.requestTimeoutMs, async (signal) => {
+  request<T>(method: string, params?: Record<string, unknown>, { transferBytes }: RequestOptions = {}): Promise<T> {
+    const deadlineMs = requestDeadlineMs(this.requestTimeoutMs, transferBytes);
+    return withDeadline(`signal-cli JSON-RPC ${method} at ${this.endpoint}`, deadlineMs, async (signal) => {
       const response = await this.fetchPath(
         "/api/v1/rpc",
         {

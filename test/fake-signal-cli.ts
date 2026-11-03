@@ -3,6 +3,7 @@ import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Serv
 import { createServer as createNetServer, type AddressInfo, type Server as NetServer, type Socket } from "node:net";
 import { createInterface } from "node:readline";
 import { json } from "node:stream/consumers";
+import { setTimeout as delay } from "node:timers/promises";
 
 export const BOT_ACCOUNT = "+15550000001";
 export const BOT_ACI = "00000000-0000-4000-8000-000000000001";
@@ -72,6 +73,7 @@ export class FakeSignalCli {
   private readonly rawRpcReplies = new Map<string, unknown>();
   private readonly holds = new Map<string, Promise<void>>();
   private readonly nextHolds = new Map<string, Promise<void>>();
+  private readonly trickles = new Map<string, { pieces: number; intervalMs: number }>();
   private readonly lineServers: NetServer[] = [];
   private readonly lineConnections = new Set<Socket>();
   /** Like signal-cli 0.14.9 `SseEventBuffer`: IDs `<run>-<sequence>`, a fresh `<run>` per daemon run. */
@@ -197,9 +199,8 @@ export class FakeSignalCli {
     this.nextHolds.delete(message.method);
     await next;
     await this.holds.get(message.method);
-    if (!socket.destroyed) {
-      socket.write(`${JSON.stringify(this.rpcReply(message))}\n`);
-    }
+    const reply = `${JSON.stringify(this.rpcReply(message))}\n`;
+    await this.writeReply(message.method, reply, (piece) => !socket.destroyed && socket.write(piece));
   }
 
   get url(): string {
@@ -247,6 +248,23 @@ export class FakeSignalCli {
       }),
     );
     return release;
+  }
+
+  /** Sends every later reply to `method` in `pieces` writes `intervalMs` apart (HTTP: after the headers), as a slow link would. */
+  trickle(method: string, pieces: number, intervalMs: number): void {
+    this.trickles.set(method, { pieces, intervalMs });
+  }
+
+  private async writeReply(method: string, text: string, write: (piece: Buffer) => void): Promise<void> {
+    const trickle = this.trickles.get(method);
+    const bytes = Buffer.from(text);
+    const size = Math.ceil(bytes.length / (trickle?.pieces ?? 1));
+    for (let offset = 0; offset < bytes.length; offset += size) {
+      if (offset > 0) {
+        await delay(trickle?.intervalMs ?? 0);
+      }
+      write(bytes.subarray(offset, offset + size));
+    }
   }
 
   /** Like signal-cli's `Manager.getSelfIdentifier()`: the number, or the ACI for an account without one. */
@@ -411,7 +429,10 @@ export class FakeSignalCli {
       const body = (await json(request)) as NonNullable<RecordedRequest["body"]>;
       recorded.body = body;
       await this.holds.get(body.method);
-      response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(this.rpcReply(body)));
+      const reply = JSON.stringify(this.rpcReply(body));
+      response.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(reply) });
+      await this.writeReply(body.method, reply, (piece) => !response.destroyed && response.write(piece));
+      response.end();
       return;
     }
 

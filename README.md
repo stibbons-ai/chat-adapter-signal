@@ -60,7 +60,7 @@ await chat.initialize();
 | `userName` | – | Defaults to the `Chat` instance's `userName`. |
 | `logger` | – | Defaults to the `Chat` instance's logger. |
 | `drainTimeoutMs` | – | How long `disconnect()` waits for running handlers and the final receive-cursor write. Default 10 000. |
-| `requestTimeoutMs` | – | How long one request to signal-cli (a send, a lookup, the startup checks) may take before it fails with a `NetworkError`, on every transport. Default 60 000. It also bounds connecting to a socket or TCP daemon. On spawn it includes signal-cli's own startup, which takes seconds. A reply that arrives later is dropped. |
+| `requestTimeoutMs` | – | How long one request to signal-cli (a send, a lookup, the startup checks) may take before it fails with a `NetworkError`, on every transport. Default 60 000. It also bounds connecting to a socket or TCP daemon. On spawn it includes signal-cli's own startup, which takes seconds. A reply that arrives later is dropped. Requests carrying attachments get longer; see [Attachments](#attachments). |
 | `reconnect` | – | `{ minDelayMs?, maxDelayMs? }` backoff for reconnecting a dropped event stream; see below. |
 
 ### Transports
@@ -436,6 +436,13 @@ with signal-cli on another host or in a container.
   of messages read back through `fetchMessages` can still fetch their content. View-once messages are ignored.
 - Both ways the whole file is one base64 JSON-RPC message, held in memory (signal-cli 0.14.9 refuses
   attachments over 150 MiB).
+- Deadline: a `send` with attachments and a `getAttachment` (`fetchData()`) may take `requestTimeoutMs`
+  plus 1 ms per 64 bytes of base64 content, i.e. the transfer may run as slow as 64 kB/s (about
+  512 kbit/s): a 10 MiB file adds about 3.6 minutes. A `send` answers only after signal-cli has also
+  uploaded the files to Signal, so both legs share that allowance. `fetchData()` sizes it from the
+  attachment's `size`; without one it allows for 150 MiB (about 55 minutes). A daemon that never answers
+  still fails the request with the usual `NetworkError` ("… did not answer within N ms") once the
+  deadline passes. On a slower link, raise `requestTimeoutMs`.
 
 ## History, users and DMs
 
@@ -478,7 +485,7 @@ signal-cli failures surface as `@chat-adapter/shared` errors (signal-cli JSON-RP
 | `AdapterRateLimitError` | signal-cli rate-limit error (`-5`), or HTTP 429; `retryAfter` in seconds when known |
 | `ResourceNotFoundError` | The recipient is not registered with Signal (`-1`); `openDM` finds no ACI for a number or username; `fetchThread` of a Group the Bot Account is not in; an attachment's `fetchData()` when signal-cli has no such attachment (`-1`) |
 | `ValidationError` | Invalid request or parameters (`-32600`, other `-32602`, other `-1` user errors) |
-| `NetworkError` | signal-cli unreachable or not startable, a request not answered within `requestTimeoutMs`, a spawned signal-cli that exited, a dropped socket, other HTTP failures, malformed replies, signal-cli I/O errors (`-3`), or a send where every recipient failed on the network (`-1` with `NETWORK_FAILURE` results) |
+| `NetworkError` | signal-cli unreachable or not startable, a request not answered within `requestTimeoutMs` (longer for attachment transfers, see [Attachments](#attachments)), a spawned signal-cli that exited, a dropped socket, other HTTP failures, malformed replies, signal-cli I/O errors (`-3`), or a send where every recipient failed on the network (`-1` with `NETWORK_FAILURE` results) |
 | `AdapterError` with `code` | `UNTRUSTED_IDENTITY` (`-4`), `CAPTCHA_REJECTED` (`-6`), `METHOD_NOT_FOUND` (`-32601`), `SIGNAL_CLI_ERROR` (anything else, e.g. `-32603`); from `initialize()`, `STARTUP_CANCELLED` when `disconnect()` ran during startup |
 
 signal-cli 0.14.9 reports an I/O failure during `send` as an internal error (`-32603`, "Failed to send message: … (IOException)"),

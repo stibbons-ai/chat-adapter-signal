@@ -5,8 +5,16 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { NetworkError, ValidationError } from "@chat-adapter/shared";
 import type { ReceiveEvent } from "../envelope.js";
-import { ADAPTER_NAME, fromJsonRpcError, malformedResponse, unreachable, withDeadline, type JsonRpcErrorObject } from "../errors.js";
-import type { EventListener, EventSubscription, SignalTransport, SubscribeOptions } from "./types.js";
+import {
+  ADAPTER_NAME,
+  fromJsonRpcError,
+  malformedResponse,
+  requestDeadlineMs,
+  unreachable,
+  withDeadline,
+  type JsonRpcErrorObject,
+} from "../errors.js";
+import type { EventListener, EventSubscription, RequestOptions, SignalTransport, SubscribeOptions } from "./types.js";
 
 export interface SpawnTransportOptions {
   type: "spawn";
@@ -122,10 +130,11 @@ export class LineTransport implements SignalTransport {
    * The deadline covers connecting and the reply. A request that misses it leaves `pending`, so
    * a late reply finds no entry and is dropped; ids are never reused, so it cannot answer another request.
    */
-  async request<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+  async request<T>(method: string, params?: Record<string, unknown>, { transferBytes }: RequestOptions = {}): Promise<T> {
     const id = this.nextRequestId++;
+    const deadlineMs = requestDeadlineMs(this.requestTimeoutMs, transferBytes);
     try {
-      return await withDeadline(`signal-cli JSON-RPC ${method} at ${this.endpoint}`, this.requestTimeoutMs, async (signal) => {
+      return await withDeadline(`signal-cli JSON-RPC ${method} at ${this.endpoint}`, deadlineMs, async (signal) => {
         const connecting = this.connect();
         // Two waits, not one around both: a connect finishing after the deadline must not send the request.
         const connection = await abortable(connecting, signal);

@@ -67,7 +67,8 @@ export interface SignalAdapterConfig {
   drainTimeoutMs?: number;
   /**
    * How long one request to signal-cli (a send, a lookup, startup's `version`) may take before it
-   * fails with a `NetworkError`, on every transport. Default: 60 000 ms.
+   * fails with a `NetworkError`, on every transport. Default: 60 000 ms. A send with attachments and
+   * an attachment's `fetchData()` get 1 ms more per 64 bytes of base64 content (a 64 kB/s transfer).
    */
   requestTimeoutMs?: number;
   /** Backoff for reconnecting a dropped event stream; see {@link ReconnectOptions}. */
@@ -542,23 +543,28 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
 
   /**
    * Sends a message body (or, with `editTimestamp`, an edit) and returns signal-cli's result with the sent timestamp.
-   * `attachments` are data URIs; callers reject them on edits, Signal edits change only the text.
+   * `attachments` are data URIs; callers reject them on edits, Signal edits change only the text. They extend the
+   * deadline: signal-cli answers only after it received them and uploaded them to Signal.
    */
   private async send(
     conversation: SignalThreadId,
     { text, styles }: SignalText,
     { attachments = [], editTimestamp }: { attachments?: string[]; editTimestamp?: number } = {},
   ): Promise<SignalSendResult> {
-    const result = await this.transport.request<SignalSendResult | null>("send", {
-      account: this.account,
-      ...recipientParams(conversation),
-      message: text,
-      ...(styles.length > 0 && {
-        textStyle: styles.map(({ start, length, style }) => `${start}:${length}:${style}`),
-      }),
-      ...(attachments.length > 0 && { attachments }),
-      ...(editTimestamp === undefined ? {} : { editTimestamp }),
-    });
+    const result = await this.transport.request<SignalSendResult | null>(
+      "send",
+      {
+        account: this.account,
+        ...recipientParams(conversation),
+        message: text,
+        ...(styles.length > 0 && {
+          textStyle: styles.map(({ start, length, style }) => `${start}:${length}:${style}`),
+        }),
+        ...(attachments.length > 0 && { attachments }),
+        ...(editTimestamp === undefined ? {} : { editTimestamp }),
+      },
+      { transferBytes: attachments.reduce((total, uri) => total + uri.length, 0) },
+    );
     if (!(result && isMessageTimestamp(result.timestamp))) {
       throw new NetworkError(ADAPTER_NAME, "signal-cli send returned no message timestamp");
     }
