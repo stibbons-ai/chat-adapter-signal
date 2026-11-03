@@ -124,7 +124,7 @@ Limits:
 - A message whose handler was cut off by a crash is replayed, but Chat skips it as a duplicate
   while its dedupe entry lasts (`dedupeTtlMs`, default 10 minutes): Chat records a message as
   seen before its handler runs. Chat does not deduplicate reactions, so such a reaction arrives again.
-- If `chat.processMessage` fails (the handler throws, or Chat's state store fails before the
+- If `chat.processMessage` or `chat.processReaction` fails (the handler throws, or Chat's state store fails before the
   handler runs), the event still counts as processed so one bad event cannot stall the stream;
   Chat logs the error.
 - After a fresh start (no stored cursor), there is no ID to resume from until the first event
@@ -181,7 +181,8 @@ edits, remote deletes, receipts, typing indicators, story replies, and legacy-gr
   previous one.
 - Incoming reactions in 1:1 Conversations and Groups fire `onReaction` with `added` (true or false),
   the normalized `emoji` (`rawEmoji` is Signal's Unicode; skin-tone variants such as 👍🏽 match only
-  by `rawEmoji`) and the reacted-to `messageId`; reactions to stories are ignored.
+  by `rawEmoji`) and the reacted-to `messageId`; reactions to stories are ignored. A reaction to another
+  user's edited message carries that edit's timestamp in `messageId` (the adapter ignores others' edits).
 - `thread.markAsRead()` sends a read receipt to the message's author (in a Group, only the author
   sees it); not for the Bot Account's own messages.
 

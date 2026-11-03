@@ -280,7 +280,7 @@ describe("inbound reactions", () => {
     expect(reactions.map(({ rawEmoji, user }) => [rawEmoji, user.userId])).toEqual([["🎉", BOB_ACI]]);
   });
 
-  it("and text messages with invalid timestamps are not handed to message handlers", async () => {
+  it("are not handed to message handlers, nor are text messages with invalid timestamps", async () => {
     const started = await bot({ initialize: false });
     const messages: Message[] = [];
     started.chat.onDirectMessage(async (_thread: Thread, message: Message) => {
@@ -304,7 +304,7 @@ describe("inbound reactions", () => {
     // The fake numbers sends from 1_700_000_000_000: the post, then its edits.
     const sent = await chat.thread(GROUP_THREAD).post("v1");
     await (await sent.edit("v2")).edit("v3");
-    // A direct caller editing by the second edit's ID (as a reaction to it would carry before mapping).
+    // A direct caller editing by the second edit's ID (the ID a reaction to that edit carries on the wire).
     await adapter.editMessage(GROUP_THREAD, `${BOT_ACI}:1700000000002`, "v4");
 
     // Kept per Bot Account for 30 days, as the README documents, always naming the original.
@@ -335,11 +335,15 @@ describe("inbound reactions", () => {
 
     const sent = await chat.thread(ALICE_DM).post("v1");
     const edited = await sent.edit("v2");
+    // A reaction to Alice's message is no edit of the bot's: no lookup, so no warn for it.
+    fake.injectEnvelope(
+      reactionEnvelope({ aci: BOB_ACI, emoji: "👍", targetAuthor: ALICE_ACI, targetTimestamp: 1_700_000_000_123, groupId: GROUP_ID }),
+    );
     fake.injectEnvelope(reactionEnvelope({ aci: ALICE_ACI, emoji: "👍", targetAuthor: BOT_ACI, targetTimestamp: 1_700_000_000_001 }));
-    await expect.poll(() => reactions.length).toBe(1);
+    await expect.poll(() => reactions.length).toBe(2);
 
     expect(edited.id).toBe(sent.id);
-    expect(reactions[0]?.messageId).toBe(`${BOT_ACI}:1700000000001`);
+    expect(reactions.map((reaction) => reaction.messageId)).toEqual([`${ALICE_ACI}:1700000000123`, `${BOT_ACI}:1700000000001`]);
     expect(fake.rpcRequests("send")).toHaveLength(2);
     // The edit looks up whether it revises an earlier edit, then stores itself; the reaction looks it up.
     expect(logger.entries.filter((entry) => entry.level === "warn").map((entry) => entry.message)).toEqual([

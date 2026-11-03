@@ -453,7 +453,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     }
   }
 
-  /** State key naming the message a Bot Account edit (by its own ID) revises. */
+  /** State key mapping a Bot Account edit's ID to the ID of the message it revises. */
   private editKey(editId: string): string {
     return `signal:edit:${this.account}:${editId}`;
   }
@@ -467,7 +467,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     }
   }
 
-  /** The ID Chat knows for a reacted-to message: the edited message's own ID for a remembered edit of the bot's, else the ID as is. */
+  /** The original message's ID if `messageId` is a remembered edit of a Bot Account message, else `messageId`. */
   private async messageIdBeforeEdits(messageId: string): Promise<string> {
     if (!(this._botUserId && messageId.startsWith(`${this._botUserId}:`))) {
       return messageId;

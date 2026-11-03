@@ -47,10 +47,10 @@ export type SignalRawMessage = SignalEnvelope | SignalSendResult;
 /**
  * Maps a 1:1 or Groups v2 text envelope to a Chat SDK message. Everything else
  * (sync messages, edits, reactions, deletes, receipts, typing, story replies,
- * legacy groups) maps to `null`; reactions go to `parseReaction`. Once `botAci` is known, group
- * messages carry a definite `isMention`: true only for a native @mention of the
- * Bot Account or a quote-reply to one of its messages, never for its name as
- * plain text.
+ * legacy groups) maps to `null` (reactions: see `parseReaction`). Once `botAci`
+ * is known, group messages carry a definite `isMention`: true only for a native
+ * @mention of the Bot Account or a quote-reply to one of its messages, never for
+ * its name as plain text.
  */
 export function parseTextMessage(
   envelope: SignalEnvelope,
@@ -95,7 +95,7 @@ export function parseTextMessage(
   });
 }
 
-/** A reaction as `Chat.processReaction` takes it, without the adapter and thread, which Chat fills in. */
+/** A reaction as `Chat.processReaction` takes it, without the adapter (the adapter adds itself) and the thread (Chat creates it). */
 export type SignalReaction = Omit<ReactionEvent<SignalRawMessage>, "adapter" | "thread">;
 
 /**
