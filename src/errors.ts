@@ -115,6 +115,21 @@ export function unreachable(what: string, cause: unknown): NetworkError {
   );
 }
 
+/**
+ * Runs one request to signal-cli under a deadline: `exchange` must reject once `signal` aborts
+ * (cancelling its work or abandoning it). A request signal-cli did not answer in time (wedged
+ * daemon, half-open connection, stuck process) then fails with a `NetworkError` naming `what`
+ * and the deadline; so does any failure that lands after the deadline passed.
+ */
+export async function withDeadline<T>(what: string, timeoutMs: number, exchange: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const signal = AbortSignal.timeout(timeoutMs);
+  try {
+    return await exchange(signal);
+  } catch (error) {
+    throw signal.aborted ? new NetworkError(ADAPTER_NAME, `${what} did not answer within ${timeoutMs} ms`) : error;
+  }
+}
+
 /** Largest delay Node's `setTimeout` honours (2^31 - 1 ms). */
 const MAX_TIMEOUT_MS = 2_147_483_647;
 

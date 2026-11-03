@@ -62,6 +62,11 @@ export interface SignalAdapterConfig {
   logger?: Logger;
   /** How long `disconnect()` waits for running message handlers and the final receive-cursor write. Default: 10 000 ms. */
   drainTimeoutMs?: number;
+  /**
+   * How long one request to signal-cli (a send, a lookup, startup's `version`) may take before it
+   * fails with a `NetworkError`, on every transport. Default: 60 000 ms.
+   */
+  requestTimeoutMs?: number;
   /** Backoff for reconnecting a dropped event stream; see {@link ReconnectOptions}. */
   reconnect?: ReconnectOptions;
 }
@@ -116,7 +121,9 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
 
     // signal-cli normalises an ACI on JSON-RPC but not in the events query, so send its canonical form everywhere.
     this.account = normalizeAci(account) ?? account;
-    this.transport = createTransport(transport, this.account);
+    const requestTimeoutMs = config.requestTimeoutMs ?? 60_000;
+    assertTimeoutMs("requestTimeoutMs", requestTimeoutMs, 1);
+    this.transport = createTransport(transport, this.account, requestTimeoutMs);
     const drainTimeoutMs = config.drainTimeoutMs ?? 10_000;
     assertTimeoutMs("drainTimeoutMs", drainTimeoutMs, 0);
     this.drainTimeoutMs = drainTimeoutMs;
@@ -674,17 +681,17 @@ export function createSignalAdapter(config?: SignalAdapterConfig): SignalAdapter
   return new SignalAdapter(config);
 }
 
-function createTransport(config: SignalTransportConfig, account: string): SignalTransport {
+function createTransport(config: SignalTransportConfig, account: string, requestTimeoutMs: number): SignalTransport {
   switch (config.type) {
     case "http":
       if (typeof config.url !== "string" || config.url === "") {
         throw new ValidationError(ADAPTER_NAME, 'transport.url is required for `{ type: "http" }`.');
       }
-      return new HttpTransport(config, account);
+      return new HttpTransport(config, account, requestTimeoutMs);
     case "spawn":
     case "socket":
     case "tcp":
-      return new LineTransport(config, account);
+      return new LineTransport(config, account, requestTimeoutMs);
     default: {
       // Unreachable for typed callers; JavaScript callers can still pass any `type`.
       const unsupported: never = config;

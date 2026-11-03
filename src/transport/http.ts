@@ -6,7 +6,15 @@ import {
   type AdapterError,
 } from "@chat-adapter/shared";
 import type { ReceiveEvent } from "../envelope.js";
-import { ADAPTER_NAME, assertTimeoutMs, fromJsonRpcError, malformedResponse, unreachable, type JsonRpcErrorObject } from "../errors.js";
+import {
+  ADAPTER_NAME,
+  assertTimeoutMs,
+  fromJsonRpcError,
+  malformedResponse,
+  unreachable,
+  withDeadline,
+  type JsonRpcErrorObject,
+} from "../errors.js";
 import { parseEventStream } from "./sse.js";
 import type { EventListener, EventSubscription, SignalTransport, SubscribeOptions } from "./types.js";
 
@@ -52,6 +60,7 @@ export class HttpTransport implements SignalTransport {
   constructor(
     options: HttpTransportOptions,
     private readonly account: string,
+    private readonly requestTimeoutMs: number,
   ) {
     this.endpoint = options.url.replace(/\/+$/, "");
     this.headers = options.headers ?? {};
@@ -60,38 +69,43 @@ export class HttpTransport implements SignalTransport {
   }
 
   async checkReachable(): Promise<void> {
-    const response = await this.fetchPath("/api/v1/check", { method: "GET" }, "health check");
+    const response = await withDeadline(`signal-cli health check at ${this.endpoint}`, this.requestTimeoutMs, (signal) =>
+      this.fetchPath("/api/v1/check", { method: "GET", signal }, "health check"),
+    );
     if (!response.ok) {
       throw fromHttpStatus(response, `signal-cli health check at ${this.endpoint}`);
     }
   }
 
-  async request<T>(method: string, params?: Record<string, unknown>): Promise<T> {
-    const response = await this.fetchPath(
-      "/api/v1/rpc",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: this.nextRequestId++, method, params }),
-      },
-      `JSON-RPC ${method}`,
-    );
-    if (!response.ok) {
-      throw fromHttpStatus(response, `signal-cli JSON-RPC ${method}`);
-    }
-    let payload: JsonRpcResponse<T> | null;
-    try {
-      payload = (await response.json()) as JsonRpcResponse<T> | null;
-    } catch (error) {
-      throw new NetworkError(ADAPTER_NAME, `signal-cli JSON-RPC ${method} returned an unreadable response`, error as Error);
-    }
-    if (typeof payload !== "object" || payload === null || !("result" in payload || "error" in payload)) {
-      throw malformedResponse(method);
-    }
-    if (payload.error) {
-      throw fromJsonRpcError(payload.error, method);
-    }
-    return payload.result as T;
+  request<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+    return withDeadline(`signal-cli JSON-RPC ${method} at ${this.endpoint}`, this.requestTimeoutMs, async (signal) => {
+      const response = await this.fetchPath(
+        "/api/v1/rpc",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: this.nextRequestId++, method, params }),
+          signal,
+        },
+        `JSON-RPC ${method}`,
+      );
+      if (!response.ok) {
+        throw fromHttpStatus(response, `signal-cli JSON-RPC ${method}`);
+      }
+      let payload: JsonRpcResponse<T> | null;
+      try {
+        payload = (await response.json()) as JsonRpcResponse<T> | null;
+      } catch (error) {
+        throw new NetworkError(ADAPTER_NAME, `signal-cli JSON-RPC ${method} returned an unreadable response`, error as Error);
+      }
+      if (typeof payload !== "object" || payload === null || !("result" in payload || "error" in payload)) {
+        throw malformedResponse(method);
+      }
+      if (payload.error) {
+        throw fromJsonRpcError(payload.error, method);
+      }
+      return payload.result as T;
+    });
   }
 
   async subscribe(listener: EventListener, options: SubscribeOptions = {}): Promise<EventSubscription> {
