@@ -107,6 +107,22 @@ describe("startTyping", () => {
     ]);
   });
 
+  it("keeps each Conversation's typing separate: a post in one leaves the other typing", async () => {
+    const started = await bot();
+
+    await started.adapter.startTyping(ALICE_DM);
+    await started.adapter.startTyping(GROUP_THREAD);
+    await started.adapter.postMessage(GROUP_THREAD, "done");
+    await advance(started, 10_000);
+
+    expect(outbound(started)).toEqual([
+      ["sendTyping", TYPING],
+      ["sendTyping", { account: BOT_ACCOUNT, groupId: GROUP_ID }],
+      ["send", { account: BOT_ACCOUNT, groupId: GROUP_ID, message: "done" }],
+      ["sendTyping", TYPING],
+    ]);
+  });
+
   it("stops refreshing after a post that bypasses Chat's thread (adapter.postMessage)", async () => {
     const started = await bot();
 
