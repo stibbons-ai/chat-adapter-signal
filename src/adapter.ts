@@ -3,6 +3,7 @@ import {
   defaultEmojiResolver,
   type Adapter,
   type AdapterPostableMessage,
+  type Attachment,
   type ChatInstance,
   type EmojiValue,
   type FetchOptions,
@@ -16,9 +17,11 @@ import {
   type ThreadInfo,
   type UserInfo,
 } from "chat";
+import { hasAttachments, outboundAttachments, withFetchData } from "./attachments.js";
 import {
   parseReaction,
   parseTextMessage,
+  type SignalEnvelope,
   type ReceiveEvent,
   type SignalRawMessage,
   type SignalSendResult,
@@ -306,11 +309,16 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   parseMessage(raw: SignalRawMessage): Message<SignalRawMessage> {
-    const message = "sourceUuid" in raw ? parseTextMessage(raw, this.formatConverter, this.bot) : null;
+    const message = "sourceUuid" in raw ? this.parseEnvelope(raw) : null;
     if (!message) {
-      throw new ValidationError(ADAPTER_NAME, "Only 1:1 and Groups v2 text envelopes can be parsed into messages");
+      throw new ValidationError(ADAPTER_NAME, "Only 1:1 and Groups v2 text or attachment envelopes can be parsed into messages");
     }
     return message;
+  }
+
+  /** Gives a received attachment back its `fetchData` (lost when Chat serializes a message), which asks signal-cli for the content. */
+  rehydrateAttachment(attachment: Attachment): Attachment {
+    return withFetchData(attachment, this.transport, this.account);
   }
 
   renderFormatted(content: FormattedContent): string {
@@ -319,17 +327,19 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
 
   /**
    * Sends a message; one over Signal's 64 KiB limit goes out as several, split preferably at
-   * paragraph breaks (see `splitSignalText`), and the first one's ID stands for it. Ends a typing
-   * indicator in the Conversation: the message clears it, or a STOP when sending fails.
+   * paragraph breaks (see `splitSignalText`), and the first one's ID stands for it. Files and
+   * attachments go as data URIs with the first part. Ends a typing indicator in the
+   * Conversation: the message clears it, or a STOP when sending fails.
    */
   async postMessage(threadId: string, message: AdapterPostableMessage): Promise<RawMessage<SignalRawMessage>> {
     const conversation = decodeThreadId(threadId);
     const botAci = this.requireBotAci();
     const [first, ...rest] = splitSignalText(this.formatConverter.renderSignal(message));
+    const attachments = await outboundAttachments(message);
     const wasTyping = await this.typing.stop(threadId);
     let result: SignalSendResult;
     try {
-      result = await this.send(conversation, first!);
+      result = await this.send(conversation, first!, { attachments });
     } catch (error) {
       if (wasTyping) {
         await this.stopTypingQuietly(threadId);
@@ -380,7 +390,10 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
    */
   async editMessage(threadId: string, messageId: string, message: AdapterPostableMessage): Promise<RawMessage<SignalRawMessage>> {
     const { conversation, timestamp } = this.ownMessage(threadId, messageId, "edit");
-    const result = await this.send(conversation, this.formatConverter.renderSignal(message), timestamp);
+    if (hasAttachments(message)) {
+      throw new ValidationError(ADAPTER_NAME, "A Signal edit cannot add attachments; post them in a new message");
+    }
+    const result = await this.send(conversation, this.formatConverter.renderSignal(message), { editTimestamp: timestamp });
     // A caller may pass an earlier edit's ID; map the new edit to the message Chat knows.
     await this.rememberEdit(encodeMessageId(this.requireBotAci(), result.timestamp), await this.messageIdBeforeEdits(messageId));
     return { id: messageId, threadId, raw: result };
@@ -447,6 +460,9 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     const history = new ThreadHistoryCache(this.chat.getState());
     // Chat stores every message of this thread ID, all from this adapter; it nulls their `raw`.
     const messages = (await history.getMessages(threadId)) as Message<SignalRawMessage>[];
+    for (const message of messages) {
+      message.attachments = message.attachments.map((attachment) => this.rehydrateAttachment(attachment));
+    }
     return historyPage(messages, options);
   }
 
@@ -508,6 +524,15 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     return { aci: this._botUserId, userName: this._userName };
   }
 
+  /** `parseTextMessage`, with `fetchData` on the attachments. */
+  private parseEnvelope(envelope: SignalEnvelope): Message<SignalRawMessage> | null {
+    const message = parseTextMessage(envelope, this.formatConverter, this.bot);
+    if (message) {
+      message.attachments = message.attachments.map((attachment) => this.rehydrateAttachment(attachment));
+    }
+    return message;
+  }
+
   private requireBotAci(): string {
     if (!this._botUserId) {
       throw new ValidationError(ADAPTER_NAME, "The Signal adapter is not initialized; call chat.initialize() first");
@@ -515,8 +540,15 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     return this._botUserId;
   }
 
-  /** Sends a message body (or, with `editTimestamp`, an edit) and returns signal-cli's result with the sent timestamp. */
-  private async send(conversation: SignalThreadId, { text, styles }: SignalText, editTimestamp?: number): Promise<SignalSendResult> {
+  /**
+   * Sends a message body (or, with `editTimestamp`, an edit) and returns signal-cli's result with the sent timestamp.
+   * `attachments` are data URIs; callers reject them on edits, Signal edits change only the text.
+   */
+  private async send(
+    conversation: SignalThreadId,
+    { text, styles }: SignalText,
+    { attachments = [], editTimestamp }: { attachments?: string[]; editTimestamp?: number } = {},
+  ): Promise<SignalSendResult> {
     const result = await this.transport.request<SignalSendResult | null>("send", {
       account: this.account,
       ...recipientParams(conversation),
@@ -524,6 +556,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       ...(styles.length > 0 && {
         textStyle: styles.map(({ start, length, style }) => `${start}:${length}:${style}`),
       }),
+      ...(attachments.length > 0 && { attachments }),
       ...(editTimestamp === undefined ? {} : { editTimestamp }),
     });
     if (!(result && isMessageTimestamp(result.timestamp))) {
@@ -608,7 +641,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       });
       return;
     }
-    const message = envelope && parseTextMessage(envelope, this.formatConverter, this.bot);
+    const message = envelope && this.parseEnvelope(envelope);
     const reaction = message ? null : envelope && parseReaction(envelope, this._botUserId);
     // The receive loop does not wait for this before the next event: one slow handler must not
     // hold up other Conversations, and Chat's concurrency strategies need to see overlapping

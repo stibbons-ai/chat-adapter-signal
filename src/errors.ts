@@ -31,6 +31,8 @@ const INVALID_PARAMS = -32602;
 // loaded); it answers INVALID_PARAMS with this message.
 const UNKNOWN_ACCOUNT_MESSAGE = "Specified account does not exist";
 const UNREGISTERED_USER_MESSAGE = /The user (.+) is not registered\./;
+/** signal-cli 0.14.9 GetAttachmentCommand, e.g. after `--ignore-attachments` or a failed download. */
+const MISSING_ATTACHMENT_MESSAGE = /^Could not find attachment with ID: (.+)$/;
 
 interface SendResult {
   type?: string;
@@ -80,6 +82,10 @@ export function fromJsonRpcError(error: JsonRpcErrorObject, method: string): Ada
       const unregistered = UNREGISTERED_USER_MESSAGE.exec(error.message);
       if (unregistered?.[1]) {
         return new ResourceNotFoundError(ADAPTER_NAME, "user", unregistered[1]);
+      }
+      const missing = MISSING_ATTACHMENT_MESSAGE.exec(error.message);
+      if (missing?.[1]) {
+        return new ResourceNotFoundError(ADAPTER_NAME, "attachment", missing[1]);
       }
       if (allResultsAre(results, "UNREGISTERED_FAILURE")) {
         const recipient = results[0]?.recipientAddress;

@@ -51,6 +51,8 @@ export class FakeSignalCli {
   contacts: Array<Record<string, unknown> & { number: string | null; uuid: string | null; username: string | null }> = [];
   /** Groups the Bot Account is in, as `listGroups` entries (`JsonGroup`; `id` in standard base64). */
   groups: Array<Record<string, unknown> & { id: string }> = [];
+  /** Files in signal-cli's attachment store, by attachment ID, for `getAttachment`. */
+  readonly storedAttachments = new Map<string, Buffer>();
   /** Status for `/api/v1/check` and every other endpoint, e.g. 401 to act like an auth proxy. */
   httpStatus = 200;
   /** Response headers sent with a non-200 `httpStatus`, e.g. `Retry-After`. */
@@ -106,6 +108,14 @@ export class FakeSignalCli {
     for (const method of ["send", "remoteDelete", "sendReaction", "sendReceipt", "sendTyping"]) {
       this.rpcHandlers.set(method, () => ({ timestamp: this.nextSendTimestamp++, results: [{ type: "SUCCESS" }] }));
     }
+    // signal-cli 0.14.9 GetAttachmentCommand: the stored file, base64 encoded, by ID alone.
+    this.rpcHandlers.set("getAttachment", (params) => {
+      const data = this.storedAttachments.get(params?.id as string);
+      if (!data) {
+        throw { code: -1, message: `Could not find attachment with ID: ${String(params?.id)}` } satisfies JsonRpcError;
+      }
+      return { data: data.toString("base64") };
+    });
   }
 
   static async start(): Promise<FakeSignalCli> {
@@ -416,7 +426,12 @@ export class FakeSignalCli {
     if (error) {
       return { jsonrpc: "2.0", id: body.id ?? null, error };
     }
-    const result = this.rpcHandlers.get(body.method)?.(body.params);
+    let result: unknown;
+    try {
+      result = this.rpcHandlers.get(body.method)?.(body.params);
+    } catch (handlerError) {
+      return { jsonrpc: "2.0", id: body.id ?? null, error: handlerError };
+    }
     if (result !== undefined) {
       return { jsonrpc: "2.0", id: body.id ?? null, result };
     }
@@ -516,6 +531,42 @@ export function reactionEnvelope(options: {
         isRemove: options.remove ?? false,
       },
       ...(options.groupId && { groupInfo: { groupId: options.groupId, groupName: "Test Group", revision: 3, type: "DELIVER" } }),
+    },
+  };
+}
+
+/**
+ * A 1:1 (or, with `groupId`, Group) message with attachments as signal-cli 0.14.9
+ * emits it (`JsonAttachment`): `message` null unless there is a caption text.
+ */
+export function attachmentEnvelope(options: {
+  aci: string;
+  attachments: Array<Record<string, unknown>>;
+  text?: string;
+  groupId?: string;
+  viewOnce?: boolean;
+}) {
+  const envelope = options.groupId
+    ? groupTextEnvelope({ aci: options.aci, groupId: options.groupId, text: "" })
+    : directTextEnvelope({ aci: options.aci, text: "" });
+  return {
+    ...envelope,
+    dataMessage: {
+      ...envelope.dataMessage,
+      message: options.text ?? null,
+      viewOnce: options.viewOnce ?? false,
+      attachments: options.attachments.map((attachment) => ({
+        contentType: "application/octet-stream",
+        filename: null,
+        id: "attachment-id",
+        size: 0,
+        width: null,
+        height: null,
+        caption: null,
+        uploadTimestamp: 1_700_000_000_000,
+        isVoiceNote: false,
+        ...attachment,
+      })),
     },
   };
 }
