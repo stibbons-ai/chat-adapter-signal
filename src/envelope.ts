@@ -46,8 +46,8 @@ export type SignalRawMessage = SignalEnvelope | SignalSendResult;
 
 /**
  * Maps a 1:1 or Groups v2 text envelope to a Chat SDK message. Everything else
- * (sync messages, edits, reactions (see `parseReaction`), deletes, receipts,
- * typing, story replies, legacy groups) maps to `null`. Once `botAci` is known, group
+ * (sync messages, edits, reactions, deletes, receipts, typing, story replies,
+ * legacy groups) maps to `null`; reactions go to `parseReaction`. Once `botAci` is known, group
  * messages carry a definite `isMention`: true only for a native @mention of the
  * Bot Account or a quote-reply to one of its messages, never for its name as
  * plain text.

@@ -1,6 +1,6 @@
 import { ValidationError } from "@chat-adapter/shared";
 import { emoji, type Message, type ReactionEvent, type Thread } from "chat";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ALICE_ACI,
   BOB_ACI,
@@ -60,11 +60,12 @@ describe("editMessage", () => {
     ]);
   });
 
-  it("edits the bot's own message in a Group", async () => {
+  it("edits the bot's own message in a Group and returns the original ID", async () => {
     const { fake, adapter } = await bot();
 
-    await adapter.editMessage(GROUP_THREAD, `${BOT_ACI}:1700000000555`, "fixed");
+    const edited = await adapter.editMessage(GROUP_THREAD, `${BOT_ACI}:1700000000555`, "fixed");
 
+    expect(edited.id).toBe(`${BOT_ACI}:1700000000555`);
     expect(fake.rpcRequests("send").at(-1)?.params).toEqual({
       account: BOT_ACCOUNT,
       groupId: GROUP_ID,
@@ -89,7 +90,7 @@ describe("deleteMessage", () => {
   });
 });
 
-describe("edit and delete of other messages", () => {
+describe("rejected inputs", () => {
   it("rejects someone else's message, a message from outside the 1:1 Conversation, malformed IDs and empty emoji without calling signal-cli", async () => {
     const { fake, adapter } = await bot();
     const before = fake.requests.length;
@@ -279,7 +280,7 @@ describe("inbound reactions", () => {
     expect(reactions.map(({ rawEmoji, user }) => [rawEmoji, user.userId])).toEqual([["🎉", BOB_ACI]]);
   });
 
-  it("are not handed to message handlers", async () => {
+  it("and text messages with invalid timestamps are not handed to message handlers", async () => {
     const started = await bot({ initialize: false });
     const messages: Message[] = [];
     started.chat.onDirectMessage(async (_thread: Thread, message: Message) => {
@@ -288,10 +289,64 @@ describe("inbound reactions", () => {
     await started.chat.initialize();
 
     started.fake.injectEnvelope(reactionEnvelope({ aci: ALICE_ACI, emoji: "👍", targetAuthor: BOT_ACI, targetTimestamp: 1 }));
+    for (const timestamp of [0, -5, 1.5]) {
+      started.fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: `at ${timestamp}`, timestamp }));
+    }
     started.fake.injectEnvelope(directTextEnvelope({ aci: ALICE_ACI, text: "sentinel" }));
     await expect.poll(() => messages.length).toBe(1);
 
     expect(messages.map((message) => message.text)).toEqual(["sentinel"]);
+  });
+
+  it("to any revision of the bot's edited message carry the message's own ID", async () => {
+    const { fake, chat, adapter, reactions } = await reactionBot();
+    const set = vi.spyOn(chat.getState(), "set");
+    // The fake numbers sends from 1_700_000_000_000: the post, then its edits.
+    const sent = await chat.thread(GROUP_THREAD).post("v1");
+    await (await sent.edit("v2")).edit("v3");
+    // A direct caller editing by the second edit's ID (as a reaction to it would carry before mapping).
+    await adapter.editMessage(GROUP_THREAD, `${BOT_ACI}:1700000000002`, "v4");
+
+    // Kept per Bot Account for 30 days, as the README documents, always naming the original.
+    const ttl = 30 * 24 * 60 * 60 * 1000;
+    expect(set.mock.calls.filter(([key]) => key.startsWith("signal:edit:"))).toEqual([
+      [`signal:edit:${BOT_ACCOUNT}:${BOT_ACI}:1700000000001`, sent.id, ttl],
+      [`signal:edit:${BOT_ACCOUNT}:${BOT_ACI}:1700000000002`, sent.id, ttl],
+      [`signal:edit:${BOT_ACCOUNT}:${BOT_ACI}:1700000000003`, sent.id, ttl],
+    ]);
+
+    for (const targetTimestamp of [1_700_000_000_000, 1_700_000_000_001, 1_700_000_000_002, 1_700_000_000_003]) {
+      fake.injectEnvelope(reactionEnvelope({ aci: ALICE_ACI, emoji: "👍", targetAuthor: BOT_ACI, targetTimestamp, groupId: GROUP_ID }));
+    }
+    fake.injectEnvelope(reactionEnvelope({ aci: ALICE_ACI, emoji: "👍", targetAuthor: BOB_ACI, targetTimestamp: 1_700_000_000_001, groupId: GROUP_ID }));
+    await expect.poll(() => reactions.length).toBe(5);
+
+    expect(reactions.map((reaction) => reaction.messageId)).toEqual([sent.id, sent.id, sent.id, sent.id, `${BOB_ACI}:1700000000001`]);
+  });
+
+  it("still arrive, carrying the edit's ID, when the state adapter fails to store or look up an edit", async () => {
+    const { fake, chat, logger, reactions } = await reactionBot();
+    const state = chat.getState();
+    const failing = (key: unknown) => typeof key === "string" && key.startsWith("signal:edit:");
+    const set = state.set.bind(state);
+    const get = state.get.bind(state);
+    vi.spyOn(state, "set").mockImplementation(async (key, ...rest) => (failing(key) ? Promise.reject(new Error("state down")) : set(key, ...rest)));
+    vi.spyOn(state, "get").mockImplementation(async (key) => (failing(key) ? Promise.reject(new Error("state down")) : get(key)));
+
+    const sent = await chat.thread(ALICE_DM).post("v1");
+    const edited = await sent.edit("v2");
+    fake.injectEnvelope(reactionEnvelope({ aci: ALICE_ACI, emoji: "👍", targetAuthor: BOT_ACI, targetTimestamp: 1_700_000_000_001 }));
+    await expect.poll(() => reactions.length).toBe(1);
+
+    expect(edited.id).toBe(sent.id);
+    expect(reactions[0]?.messageId).toBe(`${BOT_ACI}:1700000000001`);
+    expect(fake.rpcRequests("send")).toHaveLength(2);
+    // The edit looks up whether it revises an earlier edit, then stores itself; the reaction looks it up.
+    expect(logger.entries.filter((entry) => entry.level === "warn").map((entry) => entry.message)).toEqual([
+      expect.stringContaining("Could not look up a Signal edit"),
+      expect.stringContaining("Could not store a Signal edit"),
+      expect.stringContaining("Could not look up a Signal edit"),
+    ]);
   });
 });
 

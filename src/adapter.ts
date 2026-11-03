@@ -32,6 +32,7 @@ import {
   encodeMessageId,
   encodeThreadId,
   isAci,
+  isMessageTimestamp,
   normalizeAci,
   type SignalMessageId,
   type SignalThreadId,
@@ -255,8 +256,8 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   async editMessage(threadId: string, messageId: string, message: AdapterPostableMessage): Promise<RawMessage<SignalRawMessage>> {
     const { conversation, timestamp } = this.ownMessage(threadId, messageId, "edit");
     const result = await this.send(conversation, message, timestamp);
-    const editId = encodeMessageId(this.requireBotAci(), result.timestamp);
-    await this.chat?.getState().set(this.editKey(editId), messageId, EDIT_TARGET_TTL_MS);
+    // A caller may pass an earlier edit's ID; map the new edit to the message Chat knows.
+    await this.rememberEdit(encodeMessageId(this.requireBotAci(), result.timestamp), await this.messageIdBeforeEdits(messageId));
     return { id: messageId, threadId, raw: result };
   }
 
@@ -369,7 +370,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       message: this.formatConverter.renderPostable(message),
       ...(editTimestamp === undefined ? {} : { editTimestamp }),
     });
-    if (!(result && Number.isSafeInteger(result.timestamp))) {
+    if (!(result && isMessageTimestamp(result.timestamp))) {
       throw new NetworkError(ADAPTER_NAME, "signal-cli send returned no message timestamp");
     }
     return result;
@@ -445,9 +446,7 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     if (message && this.chat) {
       await this.chat.processMessage(this, message.threadId, message).catch(() => {});
     } else if (reaction && this.chat) {
-      // A reaction to an edit of the bot's message is reported on the message Chat knows.
-      const revised = await this.chat.getState().get<string>(this.editKey(reaction.messageId));
-      const reacted = { ...reaction, messageId: revised ?? reaction.messageId, adapter: this };
+      const reacted = { ...reaction, messageId: await this.messageIdBeforeEdits(reaction.messageId), adapter: this };
       await Promise.resolve(this.chat.processReaction(reacted)).catch(() => {});
     } else {
       this.logger?.debug("Ignoring Signal envelope outside the supported message types");
@@ -457,6 +456,29 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   /** State key naming the message a Bot Account edit (by its own ID) revises. */
   private editKey(editId: string): string {
     return `signal:edit:${this.account}:${editId}`;
+  }
+
+  /** Best effort: the edit is already sent, so a state failure only costs the mapping for reactions to it. */
+  private async rememberEdit(editId: string, messageId: string): Promise<void> {
+    try {
+      await this.chat?.getState().set(this.editKey(editId), messageId, EDIT_TARGET_TTL_MS);
+    } catch (error) {
+      this.logger?.warn("Could not store a Signal edit; reactions to the edited message will carry the edit's ID", { error });
+    }
+  }
+
+  /** The ID Chat knows for a reacted-to message: the edited message's own ID for a remembered edit of the bot's, else the ID as is. */
+  private async messageIdBeforeEdits(messageId: string): Promise<string> {
+    if (!(this._botUserId && messageId.startsWith(`${this._botUserId}:`))) {
+      return messageId;
+    }
+    try {
+      const edited = await this.chat?.getState().get<unknown>(this.editKey(messageId));
+      return typeof edited === "string" ? edited : messageId;
+    } catch (error) {
+      this.logger?.warn("Could not look up a Signal edit; the reaction carries the edit's ID", { error });
+      return messageId;
+    }
   }
 }
 
