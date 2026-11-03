@@ -186,12 +186,12 @@ describe("envelopes that are not user input", () => {
 });
 
 describe("parseMessage", () => {
-  it("parses a group envelope; before initialize the Bot Account is unknown, so isMention is left open", () => {
+  it("parses a group envelope; before initialize the Bot Account is unknown, so isMention is left open and its mention reads as its ACI", () => {
     const adapter = createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: "http://signal-cli:8080" } });
     const envelope = groupTextEnvelope({ aci: ALICE_ACI, groupId: GROUP_ID, text: "￼ hi", mentions: [{ aci: BOT_ACI, start: 0 }] });
 
     const message = adapter.parseMessage(envelope);
-    expect(message).toMatchObject({ threadId: GROUP_THREAD, text: "￼ hi", author: { userId: ALICE_ACI } });
+    expect(message).toMatchObject({ threadId: GROUP_THREAD, text: `@${BOT_ACI} hi`, author: { userId: ALICE_ACI } });
     expect(message.isMention).toBeUndefined();
   });
 

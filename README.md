@@ -4,8 +4,8 @@ Signal adapter for the [Chat SDK](https://github.com/vercel/chat). It talks to a
 [signal-cli](https://github.com/AsamK/signal-cli) daemon that you install and run
 yourself; this package never bundles, downloads or installs signal-cli or libsignal.
 
-> Early development: 1:1 and Group text messages in and out, over signal-cli's HTTP daemon,
-> a Unix socket, TCP, or a spawned signal-cli. Formatting, reactions and attachments are not supported yet.
+> Early development: 1:1 and Group text messages in and out, with formatting, over signal-cli's HTTP daemon,
+> a Unix socket, TCP, or a spawned signal-cli. Reactions and attachments are not supported yet.
 
 ## Requirements
 
@@ -158,11 +158,39 @@ are display data only (`author.fullName`).
 Each Group is one Conversation, so `thread.subscribe()` covers all of its messages and `thread.post`
 sends to the whole Group. Every Group message the adapter hands to Chat has `message.isMention` set: `true` for a native Signal
 @mention of the Bot Account or a quote-reply to one of its messages, which fires `onNewMention`;
-`false` otherwise, including when the bot's name only appears as text. The mention itself shows as
-U+FFFC in `message.text` for now.
+`false` otherwise, including when the bot's name only appears as text. In `message.text` a native
+@mention reads `@<userName>` for the Bot Account and `@<ACI>` for anyone else (Signal sends no
+names with mentions).
 
 Not user input, so never handed to Chat: sync messages from the Bot Account's own linked devices,
 edits, remote deletes, reactions, receipts, typing indicators, story replies, and legacy-group messages.
+
+## Formatting
+
+Signal styles text with separate ranges rather than markup; the adapter converts both ways.
+
+Outbound, `{ markdown }`, `{ ast }` and cards are sent as plain text with Signal text styles:
+
+| Markdown | On Signal |
+|---|---|
+| `**bold**`, `_italic_`, `~~strike~~` | bold, italic, strikethrough |
+| `` `code` ``, fenced code blocks | monospace (fences dropped) |
+| `\|\|spoiler\|\|` | spoiler; an unpaired `\|\|` stays text |
+| `# Heading` | bold line |
+| `- item`, `1. item` | `• item`, `1. item` (nested lists indented) |
+| `[label](url)`, `<url>` | `label (url)`, `url` |
+| `> quote` | `> quote` |
+| tables | monospace text table |
+
+A plain string or `{ raw }` is sent verbatim, without styles. Cards render as formatted text: bold
+title, subtitle, text (as markdown), bold field labels, links and link buttons as URLs, tables as
+monospace; other buttons and selects are dropped, as Signal has no interactive elements.
+`fallbackText` is not used, since the card itself renders.
+
+Inbound, Signal's bold, italic, strikethrough, monospace and spoiler ranges arrive in
+`message.formatted` as the matching markdown nodes (a spoiler as `||text||`, monospace spanning
+whole lines as a code block). `message.text` is the text as sent, with mentions resolved. Text
+without styles is taken literally: `*stars*` typed on Signal stay stars.
 
 ## Errors
 

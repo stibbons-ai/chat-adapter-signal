@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMemoryState } from "@chat-adapter/state-memory";
-import { Chat } from "chat";
+import { Chat, stringifyMarkdown } from "chat";
 import { afterEach, expect, it, vi } from "vitest";
 import { createSignalAdapter, type SignalTransportConfig } from "../src/index.js";
 import { fakeSignalCliOnPath } from "./helpers.js";
@@ -96,7 +96,7 @@ it("group bot: answers in the Group only when mentioned or quote-replied to", as
   });
   const answered: string[] = [];
   chat.onNewMention(async (thread, message) => {
-    await thread.post(`echo: ${message.text.replace("￼", "@echo-bot")}`);
+    await thread.post(`echo: ${message.text}`);
     answered.push(message.text);
   });
   await chat.initialize();
@@ -115,7 +115,60 @@ it("group bot: answers in the Group only when mentioned or quote-replied to", as
     { account: BOT_ACCOUNT, groupId, message: "echo: @echo-bot ping" },
     { account: BOT_ACCOUNT, groupId, message: "echo: pong?" },
   ]);
-  expect(answered).toEqual(["￼ ping", "pong?"]);
+  expect(answered).toEqual(["@echo-bot ping", "pong?"]);
+});
+
+/**
+ * Walkthrough for a user who formats their message, and a bot that answers in
+ * markdown: the user's styles reach the handler as markdown, the handler
+ * echoes that markdown back with a heading and a list, and signal-cli is
+ * asked to send the same styles (offsets past an emoji) plus the reply's own.
+ */
+it("formatting bot: a styled message comes in as markdown and goes back out with Signal text styles", async () => {
+  const signalCli = await FakeSignalCli.start();
+  const chat = new Chat({
+    userName: "echo-bot",
+    adapters: {
+      signal: createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: signalCli.url } }),
+    },
+    state: createMemoryState(),
+    concurrency: "queue",
+    logger: "silent",
+  });
+  const received: string[] = [];
+  chat.onDirectMessage(async (thread, message) => {
+    const markdown = stringifyMarkdown(message.formatted).trim();
+    received.push(markdown);
+    await thread.post({ markdown: `## You said\n\n- ${markdown}\n- ||nothing else||` });
+  });
+  await chat.initialize();
+  cleanup = async () => {
+    await chat.shutdown();
+    await signalCli.stop();
+  };
+
+  const envelope = directTextEnvelope({ aci: ALICE_ACI, text: "🎉 big news, see run.sh" });
+  signalCli.injectEnvelope({
+    ...envelope,
+    dataMessage: {
+      ...envelope.dataMessage,
+      textStyles: [
+        { style: "BOLD", start: 3, length: 8 },
+        { style: "MONOSPACE", start: 17, length: 6 },
+      ],
+    },
+  });
+  await expect.poll(() => received.length).toBe(1);
+
+  expect(received).toEqual(["🎉 **big news**, see `run.sh`"]);
+  expect(signalCli.rpcRequests("send").map((request) => request.params)).toEqual([
+    {
+      account: BOT_ACCOUNT,
+      recipient: [ALICE_ACI],
+      message: "You said\n\n• 🎉 big news, see run.sh\n• nothing else",
+      textStyle: ["0:8:BOLD", "15:8:BOLD", "29:6:MONOSPACE", "38:12:SPOILER"],
+    },
+  ]);
 });
 
 /**

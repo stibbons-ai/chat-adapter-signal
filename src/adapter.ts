@@ -225,7 +225,8 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   parseMessage(raw: SignalRawMessage): Message<SignalRawMessage> {
-    const message = "sourceUuid" in raw ? parseTextMessage(raw, this.formatConverter, this._botUserId) : null;
+    const bot = { aci: this._botUserId, userName: this._userName };
+    const message = "sourceUuid" in raw ? parseTextMessage(raw, this.formatConverter, bot) : null;
     if (!message) {
       throw new ValidationError(ADAPTER_NAME, "Only 1:1 and Groups v2 text envelopes can be parsed into messages");
     }
@@ -239,10 +240,14 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   async postMessage(threadId: string, message: AdapterPostableMessage): Promise<RawMessage<SignalRawMessage>> {
     const conversation = decodeThreadId(threadId);
     const botAci = this.requireBotAci();
+    const { text, styles } = this.formatConverter.renderSignal(message);
     const result = await this.transport.request<SignalSendResult | null>("send", {
       account: this.account,
       ...(conversation.type === "dm" ? { recipient: [conversation.aci] } : { groupId: conversation.groupId }),
-      message: this.formatConverter.renderPostable(message),
+      message: text,
+      ...(styles.length > 0 && {
+        textStyle: styles.map(({ start, length, style }) => `${start}:${length}:${style}`),
+      }),
     });
     if (!(result && Number.isSafeInteger(result.timestamp))) {
       throw new NetworkError(ADAPTER_NAME, "signal-cli send returned no message timestamp");
@@ -352,7 +357,8 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       });
       return;
     }
-    const message = envelope && parseTextMessage(envelope, this.formatConverter, this._botUserId);
+    const bot = { aci: this._botUserId, userName: this._userName };
+    const message = envelope && parseTextMessage(envelope, this.formatConverter, bot);
     if (!(message && this.chat)) {
       this.logger?.debug("Ignoring Signal envelope outside the supported message types");
       return;
