@@ -280,14 +280,14 @@ function renderBlock(writer: SignalTextWriter, node: Nodes): void {
 /**
  * Renders a run of sibling inline nodes. `||` in their text pairs up into
  * spoilers, first with second, third with fourth; a marker left over, or
- * pairing with nothing between, stays literal text. Card data (`LITERAL_TEXT`)
- * is never markup.
+ * pairing with nothing between, stays literal text. Text marked `literal` is
+ * never markup.
  */
 function renderInlines(writer: SignalTextWriter, nodes: readonly Nodes[]): void {
   type Token = Nodes | typeof SPOILER_MARKER;
   const tokens: Token[] = [];
   for (const node of nodes) {
-    if (node.type !== "text" || LITERAL_TEXT.has(node) || !node.value.includes(SPOILER_MARKER)) {
+    if (node.type !== "text" || (node.data !== undefined && LITERAL in node.data) || !node.value.includes(SPOILER_MARKER)) {
       tokens.push(node);
       continue;
     }
@@ -396,13 +396,16 @@ function renderLink(writer: SignalTextWriter, url: string, children: readonly No
 // ---------------------------------------------------------------------------
 // Cards -> markdown AST
 
-/** Text that is data, not markup (card titles, field values, labels; inbound Signal text): never read as `||` spoilers. */
-const LITERAL_TEXT = new WeakSet<Nodes>();
+/**
+ * Marks text that is data, not markup (card titles, field values, labels;
+ * inbound Signal text), so it is never read as `||` spoilers. Kept in the
+ * node's `data`, so it survives Chat serialising a message.
+ */
+const LITERAL = "signalLiteral";
 
 function literal(value: string): Content {
-  const node = text(value);
-  LITERAL_TEXT.add(node);
-  return node;
+  const data = { [LITERAL]: true };
+  return { type: "text", value, data };
 }
 
 function cardToAst(card: CardElement): Root {

@@ -147,13 +147,18 @@ describe("outbound markdown", () => {
     expect(converter.renderPostable({ markdown: "**b** ||s||" })).toBe("b s");
   });
 
-  it("echoes a received message's AST back without turning typed `||` into a spoiler", async () => {
+  it("echoes a received message's AST back, also after serialisation, without turning typed `||` into a spoiler", async () => {
     const { chat, fake, nextDirectMessage } = await bot();
     fake.injectEnvelope(styledEnvelope("a ||b|| c", [{ style: "BOLD", start: 0, length: 1 }]));
     const { message } = await nextDirectMessage();
     await chat.thread(DM).post({ ast: message.formatted });
+    // Chat serialises messages it queues or debounces.
+    await chat.thread(DM).post({ ast: JSON.parse(JSON.stringify(message.toJSON())).formatted });
 
-    expect(fake.rpcRequests("send")[0]?.params).toMatchObject({ message: "a ||b|| c", textStyle: ["0:1:BOLD"] });
+    expect(fake.rpcRequests("send").map((request) => request.params)).toMatchObject([
+      { message: "a ||b|| c", textStyle: ["0:1:BOLD"] },
+      { message: "a ||b|| c", textStyle: ["0:1:BOLD"] },
+    ]);
   });
 });
 
