@@ -5,38 +5,34 @@ import type { SignalText } from "./format.js";
  * with the full text as a long-text attachment that clients show in its place, as Signal's own
  * clients do; those send at most 64 KiB that way (Signal-Android `MAX_TOTAL_BODY_SIZE_BYTES`).
  */
-export const MAX_MESSAGE_BYTES = 64 * 1024;
+const MAX_MESSAGE_BYTES = 64 * 1024;
 
-/** Where a part may end, best first: a paragraph break, a line break, a space. Each drops its run of `char`. */
-const BREAKS = [
-  { separator: "\n\n", char: "\n" },
-  { separator: "\n", char: "\n" },
-  { separator: " ", char: " " },
-] as const;
+/** Where a part may end, best first: a paragraph break, a line break, a space. Each drops its run of its first character. */
+const BREAKS = ["\n\n", "\n", " "] as const;
 
 /**
  * Splits a message body longer than Signal's limit into several, each ending at the last
  * paragraph break that fits, else the last line break, else the last space, else between two
  * characters. The break itself is dropped; style ranges are clipped to each part and re-based.
  */
-export function splitSignalText(body: SignalText, maxBytes = MAX_MESSAGE_BYTES): SignalText[] {
+export function splitSignalText(body: SignalText): SignalText[] {
   const { text, styles } = body;
-  if (Buffer.byteLength(text) <= maxBytes) {
+  if (Buffer.byteLength(text) <= MAX_MESSAGE_BYTES) {
     return [body];
   }
   const parts: SignalText[] = [];
   let start = 0;
   while (start < text.length) {
-    const fit = fittingEnd(text, start, maxBytes);
+    const fit = fittingEnd(text, start, MAX_MESSAGE_BYTES);
     let end = fit;
     let next = fit;
     if (fit < text.length) {
-      for (const { separator, char } of BREAKS) {
+      for (const separator of BREAKS) {
         const at = text.lastIndexOf(separator, fit);
         if (at > start) {
           end = at;
           next = at;
-          while (text[next] === char) next++;
+          while (text[next] === separator[0]) next++;
           break;
         }
       }

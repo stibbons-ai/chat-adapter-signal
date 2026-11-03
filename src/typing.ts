@@ -2,7 +2,7 @@
  * Signal clients hide a typing indicator 15 s after the last STARTED (signal-cli `sendTyping`;
  * Signal-Android `RECIPIENT_TYPING_TIMEOUT`); Signal-Android refreshes its own every 10 s.
  */
-export const TYPING_REFRESH_MS = 10_000;
+const TYPING_REFRESH_MS = 10_000;
 
 /** How long `startTyping` keeps refreshing without a post or `endTyping`, so a handler that fails before replying does not leave the bot typing. */
 export const TYPING_MAX_MS = 2 * 60_000;
