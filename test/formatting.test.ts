@@ -127,7 +127,11 @@ describe("outbound markdown", () => {
   });
 
   it("parseSignal skips mentions with non-integer offsets", () => {
-    const mentions = [{ start: Number.NaN, length: 1, replacement: "@x" }, { start: 1.5, length: 1, replacement: "@y" }];
+    const mentions = [
+      { start: Number.NaN, length: 1, replacement: "@x" },
+      { start: 1.5, length: 1, replacement: "@y" },
+      { start: 3, length: 1.5, replacement: "@z" },
+    ];
     expect(new SignalFormatConverter().parseSignal("hello", [], mentions).text).toBe("hello");
   });
 
