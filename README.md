@@ -4,9 +4,9 @@ Signal adapter for the [Chat SDK](https://github.com/vercel/chat). It talks to a
 [signal-cli](https://github.com/AsamK/signal-cli) daemon that you install and run
 yourself; this package never bundles, downloads or installs signal-cli or libsignal.
 
-> Early development: 1:1 and Group messages in and out, with formatting, attachments, edits, remote
-> deletes, reactions and read receipts, over signal-cli's HTTP daemon, a Unix socket, TCP, or a
-> spawned signal-cli.
+> Early development: 1:1 and Group messages in and out, with formatting, attachments, streamed
+> replies, typing indicators, edits, remote deletes, reactions and read receipts, over
+> signal-cli's HTTP daemon, a Unix socket, TCP, or a spawned signal-cli.
 
 ## Requirements
 
@@ -51,6 +51,7 @@ await chat.initialize();
 | `userName` | – | Defaults to the `Chat` instance's `userName`. |
 | `logger` | – | Defaults to the `Chat` instance's logger. |
 | `drainTimeoutMs` | – | How long `disconnect()` waits for running handlers and the final receive-cursor write. Default 10 000. |
+| `requestTimeoutMs` | – | How long one request to signal-cli (a send, a lookup, the startup checks) may take before it fails with a `NetworkError`, on every transport. Default 60 000. It also bounds connecting to a socket or TCP daemon. On spawn it includes signal-cli's own startup, which takes seconds. A reply that arrives later is dropped. |
 | `reconnect` | – | `{ minDelayMs?, maxDelayMs? }` backoff for reconnecting a dropped event stream; see below. |
 
 ### Transports
@@ -187,6 +188,28 @@ edits, remote deletes, receipts, typing indicators, story replies, and legacy-gr
 - `thread.markAsRead()` sends a read receipt to the message's author (in a Group, only the author
   sees it); not for the Bot Account's own messages.
 
+## Streaming and typing
+
+`thread.startTyping()` shows Signal's typing indicator and re-sends it every 10 seconds (Signal
+clients hide it 15 seconds after the last one) until the bot posts to the Conversation (the message
+clears the indicator; a post that fails sends Signal's typing STOP instead), `adapter.endTyping()`
+sends a STOP, or 2 minutes pass, so a handler that fails before replying does not leave the bot
+typing. Signal shows no status text.
+
+`thread.post(stream)` (an AI SDK text or full stream, or any async iterable of text) shows the typing
+indicator while the stream runs, then sends the whole answer as one markdown message. It never posts
+a draft and edits it: Signal allows 10 edits per message and marks edited messages. A stream that
+fails, or ends without text, sends nothing, stops the indicator, and rejects (`ValidationError` for
+an empty one, also when the turn is aborted before any text). A turn aborted later posts the text
+so far.
+
+Signal takes up to 64 KiB of UTF-8 text per message (signal-cli sends text over 2000 bytes as a
+long-text attachment that clients show in place of the message, as Signal's apps do). A longer
+post or streamed answer goes out as several messages, split at the last paragraph break that fits
+(else a line break, else a space), each with its own formatting; files go with the first part. The first message's ID stands for
+the reply: `sent.edit()` and `sent.delete()` act on that message only. If a later part fails to
+send, the earlier ones stay sent and the post rejects.
+
 ## Formatting
 
 Signal styles text with separate ranges rather than markup; the adapter converts both ways.
@@ -273,7 +296,7 @@ signal-cli failures surface as `@chat-adapter/shared` errors (signal-cli JSON-RP
 | `AdapterRateLimitError` | signal-cli rate-limit error (`-5`), or HTTP 429; `retryAfter` in seconds when known |
 | `ResourceNotFoundError` | The recipient is not registered with Signal (`-1`); `openDM` finds no ACI for a number or username; `fetchThread` of a Group the Bot Account is not in; an attachment's `fetchData()` when signal-cli has no such attachment (`-1`) |
 | `ValidationError` | Invalid request or parameters (`-32600`, other `-32602`, other `-1` user errors) |
-| `NetworkError` | signal-cli unreachable or not startable, a spawned signal-cli that exited, a dropped socket, other HTTP failures, malformed replies, signal-cli I/O errors (`-3`), or a send where every recipient failed on the network (`-1` with `NETWORK_FAILURE` results) |
+| `NetworkError` | signal-cli unreachable or not startable, a request not answered within `requestTimeoutMs`, a spawned signal-cli that exited, a dropped socket, other HTTP failures, malformed replies, signal-cli I/O errors (`-3`), or a send where every recipient failed on the network (`-1` with `NETWORK_FAILURE` results) |
 | `AdapterError` with `code` | `UNTRUSTED_IDENTITY` (`-4`), `CAPTCHA_REJECTED` (`-6`), `METHOD_NOT_FOUND` (`-32601`), `SIGNAL_CLI_ERROR` (anything else, e.g. `-32603`); from `initialize()`, `STARTUP_CANCELLED` when `disconnect()` ran during startup |
 
 signal-cli 0.14.9 reports an I/O failure during `send` as an internal error (`-32603`, "Failed to send message: … (IOException)"),

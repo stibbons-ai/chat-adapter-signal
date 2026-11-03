@@ -1,7 +1,6 @@
 import { AdapterError, AuthenticationError, NetworkError, ResourceNotFoundError, ValidationError } from "@chat-adapter/shared";
 import {
   defaultEmojiResolver,
-  NotImplementedError,
   type Adapter,
   type AdapterPostableMessage,
   type Attachment,
@@ -13,6 +12,7 @@ import {
   type Logger,
   type Message,
   type RawMessage,
+  type StreamChunk,
   ThreadHistoryCache,
   type ThreadInfo,
   type UserInfo,
@@ -28,9 +28,10 @@ import {
 } from "./envelope.js";
 import { contactDisplayName, findContact, findGroup } from "./directory.js";
 import { ADAPTER_NAME, assertTimeoutMs, malformedResponse } from "./errors.js";
-import { SignalFormatConverter } from "./format.js";
+import { SignalFormatConverter, type SignalText } from "./format.js";
 import { historyPage } from "./history.js";
 import { ReceiveLoop, reconnectOptions, type ReconnectOptions } from "./receive-loop.js";
+import { splitSignalText } from "./split.js";
 import { HttpTransport, type HttpTransportOptions } from "./transport/http.js";
 import { LineTransport, type LineTransportOptions } from "./transport/line.js";
 import type { SignalTransport } from "./transport/types.js";
@@ -45,6 +46,7 @@ import {
   type SignalMessageId,
   type SignalThreadId,
 } from "./thread-id.js";
+import { TYPING_MAX_MS, TypingIndicators } from "./typing.js";
 
 /** Oldest signal-cli release this adapter is tested against. */
 export const MIN_SIGNAL_CLI_VERSION = "0.14.9";
@@ -63,6 +65,11 @@ export interface SignalAdapterConfig {
   logger?: Logger;
   /** How long `disconnect()` waits for running message handlers and the final receive-cursor write. Default: 10 000 ms. */
   drainTimeoutMs?: number;
+  /**
+   * How long one request to signal-cli (a send, a lookup, startup's `version`) may take before it
+   * fails with a `NetworkError`, on every transport. Default: 60 000 ms.
+   */
+  requestTimeoutMs?: number;
   /** Backoff for reconnecting a dropped event stream; see {@link ReconnectOptions}. */
   reconnect?: ReconnectOptions;
 }
@@ -96,6 +103,10 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   private _botUserId: string | undefined;
   /** The Bot Account's phone number, if it has one; signal-cli labels its events with it. */
   private botNumber: string | undefined;
+  private readonly typing = new TypingIndicators(
+    (threadId) => this.sendTyping(threadId, false),
+    (error) => this.logger?.warn("Could not refresh a Signal typing indicator", { error }),
+  );
 
   constructor(config: SignalAdapterConfig = {}) {
     const account = config.account ?? process.env.SIGNAL_ACCOUNT;
@@ -113,7 +124,9 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
 
     // signal-cli normalises an ACI on JSON-RPC but not in the events query, so send its canonical form everywhere.
     this.account = normalizeAci(account) ?? account;
-    this.transport = createTransport(transport, this.account);
+    const requestTimeoutMs = config.requestTimeoutMs ?? 60_000;
+    assertTimeoutMs("requestTimeoutMs", requestTimeoutMs, 1);
+    this.transport = createTransport(transport, this.account, requestTimeoutMs);
     const drainTimeoutMs = config.drainTimeoutMs ?? 10_000;
     assertTimeoutMs("drainTimeoutMs", drainTimeoutMs, 0);
     this.drainTimeoutMs = drainTimeoutMs;
@@ -207,8 +220,10 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
         this.logger?.warn(`Stopped waiting for ${pending} Signal message handler(s) after ${this.drainTimeoutMs} ms`);
       }
     }
-    // After the drain: running handlers reply through the transport. ponytail: a handler that
-    // outlives drainTimeoutMs and sends afterwards reopens the transport; nothing closes that one.
+    // After the drain: running handlers reply through the transport, and their streams keep
+    // typing until then. ponytail: a handler that outlives drainTimeoutMs and sends afterwards
+    // reopens the transport; nothing closes that one.
+    this.typing.stopAll();
     await this.transport.close();
   }
 
@@ -310,11 +325,62 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     return this.formatConverter.fromAst(content);
   }
 
+  /**
+   * Sends a message; one over Signal's 64 KiB limit goes out as several, split preferably at
+   * paragraph breaks (see `splitSignalText`), and the first one's ID stands for it. Files and
+   * attachments go as data URIs with the first part. Ends a typing indicator in the
+   * Conversation: the message clears it, or a STOP when sending fails.
+   */
   async postMessage(threadId: string, message: AdapterPostableMessage): Promise<RawMessage<SignalRawMessage>> {
     const conversation = decodeThreadId(threadId);
     const botAci = this.requireBotAci();
-    const result = await this.send(conversation, message);
+    const [first, ...rest] = splitSignalText(this.formatConverter.renderSignal(message));
+    const attachments = await outboundAttachments(message);
+    const wasTyping = await this.typing.stop(threadId);
+    let result: SignalSendResult;
+    try {
+      result = await this.send(conversation, first!, { attachments });
+    } catch (error) {
+      if (wasTyping) {
+        await this.stopTypingQuietly(threadId);
+      }
+      throw error;
+    }
+    for (const part of rest) {
+      await this.send(conversation, part);
+    }
     return { id: encodeMessageId(botAci, result.timestamp), threadId, raw: result };
+  }
+
+  /**
+   * Shows the typing indicator while the stream runs, then posts the whole text once (split
+   * like `postMessage` when too long). Never edits: Signal allows 10 edits per message and
+   * marks edited messages.
+   */
+  async stream(threadId: string, textStream: AsyncIterable<string | StreamChunk>): Promise<RawMessage<SignalRawMessage>> {
+    decodeThreadId(threadId);
+    this.requireBotAci();
+    try {
+      await this.typing.start(threadId, Number.POSITIVE_INFINITY);
+    } catch (error) {
+      this.logger?.warn("Could not show a Signal typing indicator", { error });
+    }
+    let markdown = "";
+    try {
+      for await (const chunk of textStream) {
+        markdown += typeof chunk === "string" ? chunk : chunk.type === "markdown_text" ? chunk.text : "";
+      }
+      if (!markdown.trim()) {
+        throw new ValidationError(ADAPTER_NAME, "The stream produced no text to send");
+      }
+    } catch (error) {
+      // The stream's own error is what the caller needs, not a failed STOP.
+      if (await this.typing.stop(threadId)) {
+        await this.stopTypingQuietly(threadId);
+      }
+      throw error;
+    }
+    return this.postMessage(threadId, { markdown });
   }
 
   /**
@@ -324,7 +390,10 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
    */
   async editMessage(threadId: string, messageId: string, message: AdapterPostableMessage): Promise<RawMessage<SignalRawMessage>> {
     const { conversation, timestamp } = this.ownMessage(threadId, messageId, "edit");
-    const result = await this.send(conversation, message, timestamp);
+    if (hasAttachments(message)) {
+      throw new ValidationError(ADAPTER_NAME, "A Signal edit cannot add attachments; post them in a new message");
+    }
+    const result = await this.send(conversation, this.formatConverter.renderSignal(message), { editTimestamp: timestamp });
     // A caller may pass an earlier edit's ID; map the new edit to the message Chat knows.
     await this.rememberEdit(encodeMessageId(this.requireBotAci(), result.timestamp), await this.messageIdBeforeEdits(messageId));
     return { id: messageId, threadId, raw: result };
@@ -363,8 +432,19 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     });
   }
 
-  async startTyping(): Promise<void> {
-    throw new NotImplementedError("The Signal adapter does not support typing indicators yet", "startTyping");
+  /**
+   * Shows the typing indicator and keeps it up (Signal clients drop it after 15 s) until the
+   * next post to the Conversation, `endTyping`, or 2 minutes. Signal shows no status text.
+   */
+  async startTyping(threadId: string): Promise<void> {
+    decodeThreadId(threadId);
+    await this.typing.start(threadId, TYPING_MAX_MS);
+  }
+
+  async endTyping(threadId: string): Promise<void> {
+    if (await this.typing.stop(threadId)) {
+      await this.sendTyping(threadId, true);
+    }
   }
 
   /**
@@ -461,16 +541,14 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
   }
 
   /**
-   * Sends a message (or, with `editTimestamp`, an edit) and returns signal-cli's result with the sent timestamp.
-   * Files and attachments go as data URIs; an edit cannot carry any, Signal edits change only the text.
+   * Sends a message body (or, with `editTimestamp`, an edit) and returns signal-cli's result with the sent timestamp.
+   * `attachments` are data URIs; callers reject them on edits, Signal edits change only the text.
    */
-  private async send(conversation: SignalThreadId, message: AdapterPostableMessage, editTimestamp?: number): Promise<SignalSendResult> {
-    const { text, styles } = this.formatConverter.renderSignal(message);
-    // Checked before encoding: a rejected edit should not base64 a large file first.
-    if (editTimestamp !== undefined && hasAttachments(message)) {
-      throw new ValidationError(ADAPTER_NAME, "A Signal edit cannot add attachments; post them in a new message");
-    }
-    const attachments = await outboundAttachments(message);
+  private async send(
+    conversation: SignalThreadId,
+    { text, styles }: SignalText,
+    { attachments = [], editTimestamp }: { attachments?: string[]; editTimestamp?: number } = {},
+  ): Promise<SignalSendResult> {
     const result = await this.transport.request<SignalSendResult | null>("send", {
       account: this.account,
       ...recipientParams(conversation),
@@ -485,6 +563,23 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
       throw new NetworkError(ADAPTER_NAME, "signal-cli send returned no message timestamp");
     }
     return result;
+  }
+
+  private async sendTyping(threadId: string, stop: boolean): Promise<void> {
+    await this.transport.request("sendTyping", {
+      account: this.account,
+      ...recipientParams(decodeThreadId(threadId)),
+      ...(stop ? { stop: true } : {}),
+    });
+  }
+
+  /** A STOP on a failure path: logged, not thrown, so the failure that led here reaches the caller. */
+  private async stopTypingQuietly(threadId: string): Promise<void> {
+    try {
+      await this.sendTyping(threadId, true);
+    } catch (error) {
+      this.logger?.warn("Could not stop a Signal typing indicator", { error });
+    }
   }
 
   private async sendReaction(threadId: string, messageId: string, emoji: EmojiValue | string, remove: boolean): Promise<void> {
@@ -619,17 +714,17 @@ export function createSignalAdapter(config?: SignalAdapterConfig): SignalAdapter
   return new SignalAdapter(config);
 }
 
-function createTransport(config: SignalTransportConfig, account: string): SignalTransport {
+function createTransport(config: SignalTransportConfig, account: string, requestTimeoutMs: number): SignalTransport {
   switch (config.type) {
     case "http":
       if (typeof config.url !== "string" || config.url === "") {
         throw new ValidationError(ADAPTER_NAME, 'transport.url is required for `{ type: "http" }`.');
       }
-      return new HttpTransport(config, account);
+      return new HttpTransport(config, account, requestTimeoutMs);
     case "spawn":
     case "socket":
     case "tcp":
-      return new LineTransport(config, account);
+      return new LineTransport(config, account, requestTimeoutMs);
     default: {
       // Unreachable for typed callers; JavaScript callers can still pass any `type`.
       const unsupported: never = config;

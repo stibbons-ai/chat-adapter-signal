@@ -98,6 +98,22 @@ describe("outbound attachments", () => {
     ]);
   });
 
+  it("sends the files once, with the first part of a reply split over Signal's 64 KiB limit", async () => {
+    const started = await bot();
+    const a = "a".repeat(40_000);
+    const b = "b".repeat(40_000);
+
+    const sent = await started.chat.thread(ALICE_DM).post({
+      raw: `${a}\n\n${b}`,
+      files: [{ data: PNG, filename: "chart.png", mimeType: "image/png" }],
+    });
+
+    const sends = started.fake.rpcRequests("send").map((request) => request.params);
+    expect(sends.map((params) => params?.message)).toEqual([a, b]);
+    expect(sends.map((params) => params?.attachments)).toEqual([[`data:image/png;filename=chart.png;base64,${PNG.toString("base64")}`], undefined]);
+    expect(sent.id).toBe(`${BOT_ACI}:1700000000000`);
+  });
+
   it("sends postable attachments that carry data, after the files", async () => {
     const started = await bot();
 

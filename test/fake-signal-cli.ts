@@ -105,7 +105,7 @@ export class FakeSignalCli {
       return this.groups.filter((group) => !wanted || wanted.includes(group.id));
     });
     // signal-cli 0.14.9 answers each of these with the sent timestamp and per-recipient results.
-    for (const method of ["send", "remoteDelete", "sendReaction", "sendReceipt"]) {
+    for (const method of ["send", "remoteDelete", "sendReaction", "sendReceipt", "sendTyping"]) {
       this.rpcHandlers.set(method, () => ({ timestamp: this.nextSendTimestamp++, results: [{ type: "SUCCESS" }] }));
     }
     // signal-cli 0.14.9 GetAttachmentCommand: the stored file, base64 encoded, by ID alone.
@@ -222,6 +222,11 @@ export class FakeSignalCli {
   /** Answer every later call of `method` with this JSON-RPC error. */
   failRpc(method: string, error: JsonRpcError): void {
     this.rpcErrors.set(method, error);
+  }
+
+  /** Answer `method` normally again after `failRpc`. */
+  clearRpcFailure(method: string): void {
+    this.rpcErrors.delete(method);
   }
 
   /** Answer every later call of `method` with this exact JSON body, valid JSON-RPC or not (as a broken proxy might). */
