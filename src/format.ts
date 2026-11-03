@@ -620,7 +620,6 @@ function monospaceRuns(segments: readonly Segment[]): Array<{ start: number; end
   return runs;
 }
 
-
 type Piece = { value: string; styles: ReadonlySet<SignalStyle> };
 
 /** Nests pieces by style in `SIGNAL_STYLES` order: consecutive pieces sharing a style share one node. */

@@ -110,11 +110,19 @@ describe("outbound markdown", () => {
     expect(await send({ markdown: "- [x] done\n- [ ] todo\n- plain" })).toEqual({ message: "• ☑ done\n• ☐ todo\n• plain" });
   });
 
-  it("pairs several spoilers in one run, indents under ordered markers, and keeps an undefined reference as text", async () => {
-    expect(await send({ markdown: "||a|| and ||b||\n\n1. a\n   - b\n\n[x][missing]" })).toEqual({
-      message: "a and b\n\n1. a\n   • b\n\n[x][missing]",
+  it("pairs several spoilers in one run, indents under ordered markers and in quotes, keeps an undefined reference as text", async () => {
+    expect(await send({ markdown: "||a|| and ||b||\n\n1. a\n   - b\n\n[x][missing] ![](https://e.com/i.png)\n\n> p1\n>\n> - q" })).toEqual({
+      message: "a and b\n\n1. a\n   • b\n\n[x][missing] https://e.com/i.png\n\n> p1\n> \n> • q",
       textStyle: ["0:1:SPOILER", "6:1:SPOILER"],
     });
+  });
+
+  it("toAst takes Signal text literally", () => {
+    expect(stringifyMarkdown(new SignalFormatConverter().toAst("**x** ||y||"))).toBe("\\*\\*x\\*\\* ||y||\n");
+  });
+
+  it("rejects a postable message of unknown shape like Chat's own converter", () => {
+    expect(() => new SignalFormatConverter().renderSignal({} as never)).toThrow("Invalid PostableMessage format");
   });
 
   it("sends an mdast AST with styles", async () => {
@@ -305,6 +313,10 @@ describe("inbound text styles", () => {
     ["a style ending inside an emoji takes the whole emoji", "x😀", [{ style: "BOLD", start: 0, length: 2 }], "**x😀**\n"],
     ["monospace keeps its edge spaces", "a  x  b", [{ style: "MONOSPACE", start: 1, length: 5 }], "a`   x   `b\n"],
     ["monospace from mid-line over a line break stays inline", "a b\nc", [{ style: "MONOSPACE", start: 2, length: 3 }], "a `b\nc`\n"],
+    ["overlapping monospace ranges make one code span", "a bcd e", [{ style: "MONOSPACE", start: 2, length: 2 }, { style: "MONOSPACE", start: 3, length: 2 }], "a `bcd` e\n"],
+    ["bold inside monospace splits the code span around it", "a bcd e", [{ style: "MONOSPACE", start: 2, length: 3 }, { style: "BOLD", start: 3, length: 1 }], "a `b`**`c`**`d` e\n"],
+    ["monospace over whole lines ending mid-line stays inline", "a\nb\ncd", [{ style: "MONOSPACE", start: 0, length: 5 }], "`a\nb\nc`d\n"],
+    ["whole lines of monospace selected with the line break before them are a code block", "x\na\nb\ny", [{ style: "MONOSPACE", start: 1, length: 4 }], "x\n\n```\na\nb\n```\n\ny\n"],
   ])("%s", (_name, text, textStyles, markdown) => {
     const adapter = createSignalAdapter({ account: BOT_ACCOUNT, transport: { type: "http", url: "http://signal-cli:8080" } });
 
