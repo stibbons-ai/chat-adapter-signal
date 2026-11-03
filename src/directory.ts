@@ -15,11 +15,15 @@ export interface SignalContact {
   profile?: { givenName?: string | null; familyName?: string | null } | null;
 }
 
-/** A `listGroups` entry (signal-cli 0.14.9 `JsonGroup`); `id` is standard base64, member `uuid`s are ACIs. */
+/**
+ * A `listGroups` entry (signal-cli 0.14.9 `JsonGroup`); `id` is standard base64, member `uuid`s
+ * are ACIs. `isMember` is false for a Group the Bot Account left or was removed from.
+ */
 export interface SignalGroup {
   id: string;
   name?: string | null;
   description?: string | null;
+  isMember?: boolean;
   members?: Array<{ uuid?: string | null } | null> | null;
 }
 
@@ -52,15 +56,16 @@ export async function findGroup(transport: SignalTransport, account: string, gro
 
 /**
  * The name signal-cli puts in an envelope's `sourceName` (`getContactOrProfileName`):
- * the nickname, else the contact name, else the profile name; then the number, then the ACI.
+ * the nickname, else the contact name, else the profile name; then the number.
+ * Empty when signal-cli knows none of them.
  */
-export function contactDisplayName(contact: AciContact): string {
+export function contactDisplayName(contact: SignalContact): string {
   return (
     joinName(contact.nickGivenName, contact.nickFamilyName) ||
     contact.name ||
     joinName(contact.profile?.givenName, contact.profile?.familyName) ||
     contact.number ||
-    contact.uuid
+    ""
   );
 }
 

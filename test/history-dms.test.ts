@@ -146,6 +146,8 @@ describe("fetchThread", () => {
       recipient: [ALICE_ACI],
       allRecipients: true,
     });
+    // A user signal-cli knows nothing about is named by ACI, as a message author would be.
+    expect(await adapter.fetchThread(BOB_DM)).toMatchObject({ channelName: BOB_ACI, metadata: { aci: BOB_ACI } });
   });
 
   it("describes a Group by name, description and member ACIs, without phone numbers", async () => {
@@ -174,8 +176,11 @@ describe("fetchThread", () => {
     ]);
   });
 
-  it("throws ResourceNotFoundError for a Group the Bot Account is not in, and ValidationError for an invalid ID", async () => {
-    const { adapter } = await echoBot();
+  it("throws ResourceNotFoundError for a Group the Bot Account is not or no longer in, and ValidationError for an invalid ID", async () => {
+    const { fake, adapter } = await echoBot();
+    await expect(adapter.fetchThread(GROUP_THREAD)).rejects.toThrow(ResourceNotFoundError);
+    // signal-cli keeps a Group the Bot Account left, with `isMember: false`.
+    fake.groups.push({ id: GROUP_ID, name: "Old club", isMember: false, members: [] });
     await expect(adapter.fetchThread(GROUP_THREAD)).rejects.toThrow(ResourceNotFoundError);
     await expect(adapter.fetchThread("signal:group:abc")).rejects.toThrow(ValidationError);
   });
@@ -209,9 +214,11 @@ describe("getUser", () => {
     expect(names).toEqual(["Nick", "Contact Name", "+15550003333"]);
   });
 
-  it("returns null for an ACI signal-cli does not know and rejects anything but an ACI", async () => {
+  it("returns null for an ACI signal-cli knows neither a name nor a number for, and rejects anything but an ACI", async () => {
     const { fake, adapter } = await echoBot();
+    // signal-cli answers any ACI, with an empty entry for one it has not seen.
     expect(await adapter.getUser(CAROL_ACI)).toBeNull();
+    expect(fake.rpcRequests("listContacts").at(-1)?.params).toMatchObject({ recipient: [CAROL_ACI] });
     const lookups = fake.rpcRequests("listContacts").length;
     await expect(adapter.getUser(ALICE_NUMBER)).rejects.toThrow(ValidationError);
     expect(fake.rpcRequests("listContacts")).toHaveLength(lookups);

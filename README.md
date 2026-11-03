@@ -172,13 +172,16 @@ each Conversation in its state adapter: every message it hands to a handler and 
 returns that record, oldest first, paged by message ID: what the bot saw since it started, within
 Chat's `history.thread` limits (default 100 messages per Conversation, 7 days). Recorded messages have
 `raw: null`, and the bot's own posts carry Chat's `author.userId: "self"` with `isMe: true`.
-The record is keyed by thread ID only, so give each Bot Account its own state store.
+The record is keyed by thread ID only, so give each Bot Account its own state store. Recording
+needs the state store: a handler still running after `chat.shutdown()` gets an error from
+`thread.post` even though signal-cli already sent the message.
 
-`fetchThread` names a 1:1 Conversation after the user (`metadata.aci`) and a Group after its
-Signal name (`metadata.groupId`, `description`, `members` as ACIs); a Group the Bot Account is not
-in throws `ResourceNotFoundError`. `getUser(aci)` returns `userId` and `userName` as the ACI and
-`fullName` as signal-cli names the sender in messages (nickname, contact name, profile name,
-then phone number), or `null` for an unknown ACI.
+`fetchThread` names a 1:1 Conversation after the user (`metadata.aci`; the ACI when signal-cli knows
+no name) and a Group after its Signal name (`metadata.groupId`, `description`, `members` as ACIs,
+leaving out members signal-cli knows no ACI for); a Group the Bot Account is not or no longer in
+throws `ResourceNotFoundError`. `getUser(aci)` returns `userId` and `userName` as the ACI and
+`fullName` as signal-cli names the sender in messages (nickname, contact name, profile name, then
+phone number), or `null` when signal-cli knows none of these for the ACI.
 
 `adapter.openDM(user)` takes an ACI, a phone number (`+15550001111`) or `u:<username>` and returns
 `signal:dm:<ACI>`; signal-cli looks numbers and usernames up on the Signal server, and a user it

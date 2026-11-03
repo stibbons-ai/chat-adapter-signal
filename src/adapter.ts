@@ -235,12 +235,13 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
         id: threadId,
         channelId: threadId,
         isDM: true,
-        channelName: contact ? contactDisplayName(contact) : conversation.aci,
+        channelName: (contact && contactDisplayName(contact)) || conversation.aci,
         metadata: { aci: conversation.aci },
       };
     }
     const group = await findGroup(this.transport, this.account, conversation.groupId);
-    if (!group) {
+    // signal-cli keeps Groups the Bot Account left or was removed from, with `isMember: false`.
+    if (!group?.isMember) {
       throw new ResourceNotFoundError(ADAPTER_NAME, "group", conversation.groupId);
     }
     return {
@@ -256,17 +257,19 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
     };
   }
 
-  /** Looks a user up by ACI; `userName` is the ACI, as on message authors. `null` when signal-cli knows no such user. */
+  /**
+   * Looks a user up by ACI; `userName` is the ACI, as on message authors. `null` when
+   * signal-cli knows neither a name nor a number for the ACI: it answers any well-formed
+   * ACI, recording a recipient it has not seen before.
+   */
   async getUser(userId: string): Promise<UserInfo | null> {
     const aci = normalizeAci(userId);
     if (!aci) {
       throw new ValidationError(ADAPTER_NAME, `Invalid Signal user ID ${JSON.stringify(userId)}; expected an ACI`);
     }
     const contact = await findContact(this.transport, this.account, aci);
-    if (contact?.uuid !== aci) {
-      return null;
-    }
-    return { userId: aci, userName: aci, fullName: contactDisplayName(contact), isBot: aci === this._botUserId };
+    const fullName = contact?.uuid === aci ? contactDisplayName(contact) : undefined;
+    return fullName ? { userId: aci, userName: aci, fullName, isBot: aci === this._botUserId } : null;
   }
 
   /**

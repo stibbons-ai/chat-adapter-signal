@@ -12,6 +12,7 @@ const FAKE_BUFFER_EVENTS = 1000;
 let fakeInstances = 0;
 export const ALICE_ACI = "a1b2c3d4-0000-4000-8000-00000000a11c";
 export const BOB_ACI = "b0b0b0b0-0000-4000-8000-000000000b0b";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export interface RecordedRequest {
   /** HTTP path and query, or `line` for a request over a line-delimited JSON-RPC connection. */
@@ -83,16 +84,19 @@ export class FakeSignalCli {
     this.server = createServer((request, response) => void this.handle(request, response));
     this.rpcHandlers.set("version", () => ({ version: this.version }));
     this.rpcHandlers.set("listAccounts", () => (this.singleAccount ? undefined : this.accounts));
-    // signal-cli 0.14.9 ListContactsCommand JSON output: the ACI is `uuid`.
+    // signal-cli 0.14.9 ListContactsCommand JSON output: the ACI is `uuid`. Like signal-cli, an ACI it
+    // has not seen yet gets a new, empty recipient entry (RecipientStore.resolveRecipientLocked).
     this.rpcHandlers.set("listContacts", (params) => {
       const wanted = (params?.recipient as string[] | undefined) ?? [];
       const own = this.accounts.map((entry) => ({ number: entry.number, uuid: entry.aci, username: null, name: "" }));
-      return [...own, ...this.contacts].filter(
+      const found = [...own, ...this.contacts].filter(
         (entry) =>
           wanted.includes(entry.number ?? "") ||
           wanted.includes(entry.uuid ?? "") ||
           (entry.username !== null && wanted.includes(`u:${entry.username}`)),
       );
+      const unseen = wanted.filter((recipient) => UUID_PATTERN.test(recipient) && !found.some((entry) => entry.uuid === recipient));
+      return [...found, ...unseen.map((uuid) => ({ number: null, uuid, username: null, name: "", profile: null }))];
     });
     this.rpcHandlers.set("listGroups", (params) => {
       const wanted = params?.groupId as string[] | undefined;
