@@ -134,8 +134,8 @@ docker compose logs -f echo-bot
 ```
 
 Then send the Bot Account a message from another Signal account. As long as no Bot Account is
-provisioned, the bot exits with `AuthenticationError: Bot Account … is not registered or linked on the
-signal-cli daemon` and compose restarts it.
+provisioned (with `SIGNAL_ACCOUNT` set), the bot exits with `AuthenticationError: Bot Account … is not
+registered or linked on the signal-cli daemon` and compose restarts it.
 
 `--receive-mode on-start` (signal-cli's default, spelled out) makes signal-cli receive from Signal from
 the moment it starts, also while the Host App is disconnected; from the Host App's first connection on,
@@ -247,10 +247,11 @@ createSignalAdapter({
 ```
 
 Use a long random password and an `https://` URL only: basic auth sends the password with every request.
-Whoever passes the proxy gets all of signal-cli's JSON-RPC, not only sending and receiving. Once the Bot
-Account is provisioned, start the daemon with `-a <account>` (`-a +15550000001 daemon --http …`): it then
-no longer serves the account-management methods (link, register) that a daemon without `-a`, like the
-example's, offers. With missing or wrong credentials, `initialize()` rejects with `AuthenticationError`
+Whoever passes the proxy gets all of signal-cli's JSON-RPC, not only sending and receiving, including
+`unregister` and `removeDevice`: the proxy's authentication is the only barrier. Once the Bot Account is
+provisioned, start the daemon with `-a <account>` (`-a +15550000001 daemon --http …`): it then no longer
+serves `register`, `verify`, `startLink`/`finishLink` or `deleteLocalAccountData`, which a daemon without
+`-a`, like the example's, offers. With missing or wrong credentials, `initialize()` rejects with `AuthenticationError`
 (HTTP 401). Any proxy and scheme works, e.g. a bearer token checked by the proxy, as long as the proxy:
 
 - passes the event stream (`/api/v1/events`, server-sent events) through and keeps it open; Caddy and
