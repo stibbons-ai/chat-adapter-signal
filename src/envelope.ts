@@ -115,6 +115,7 @@ export function parseReaction(envelope: SignalEnvelope, botAci: string | undefin
     typeof reaction.emoji !== "string" ||
     !reaction.emoji ||
     !isAci(reaction.targetAuthorUuid) ||
+    typeof reaction.targetSentTimestamp !== "number" ||
     !Number.isSafeInteger(reaction.targetSentTimestamp)
   ) {
     return null;
@@ -125,7 +126,7 @@ export function parseReaction(envelope: SignalEnvelope, botAci: string | undefin
   }
   return {
     threadId,
-    messageId: encodeMessageId(reaction.targetAuthorUuid, reaction.targetSentTimestamp as number),
+    messageId: encodeMessageId(reaction.targetAuthorUuid, reaction.targetSentTimestamp),
     emoji: defaultEmojiResolver.fromGChat(reaction.emoji),
     rawEmoji: reaction.emoji,
     added: reaction.isRemove !== true,
