@@ -118,7 +118,7 @@ compose file:
 
 - `signal-cli`: the community image `registry.gitlab.com/packaging/signal-cli/signal-cli-native`
   ([packaging/signal-cli](https://gitlab.com/packaging/signal-cli), a native build that needs no Java),
-  pinned to `v0-14-9-2` (signal-cli 0.14.9, package build 2). It runs
+  pinned to a release tag in `compose.yaml` (`v<signal-cli version>-<package build>`). It runs
   `daemon --http 0.0.0.0:8080 --receive-mode on-start --no-receive-stdout` and keeps its data (the Bot
   Account's keys and state) in the `signal-cli-data` volume. It publishes no ports.
 - `echo-bot`: [`bot.ts`](examples/echo-bot/bot.ts), which answers 1:1 messages and Mentions with
@@ -127,20 +127,22 @@ compose file:
 
 ```sh
 cd examples/echo-bot
-docker compose run --rm signal-cli link -n echo-bot   # or register a number, see below
-echo 'SIGNAL_ACCOUNT=+15550000001' > .env             # the Bot Account's number
+# provision the Bot Account first, see Provisioning below: register a dedicated number, or link
+echo 'SIGNAL_ACCOUNT=+15550000001' > .env   # the Bot Account's number
 docker compose up -d --build
 docker compose logs -f echo-bot
 ```
 
-Then send the Bot Account a message from Signal. As long as no Bot Account is provisioned, the bot exits
-with `AuthenticationError: Bot Account … is not registered or linked on the signal-cli daemon` and
-compose restarts it.
+Then send the Bot Account a message from another Signal account. As long as no Bot Account is
+provisioned, the bot exits with `AuthenticationError: Bot Account … is not registered or linked on the
+signal-cli daemon` and compose restarts it.
 
 `--receive-mode on-start` (signal-cli's default, spelled out) makes signal-cli receive from Signal from
 the moment it starts, also while the Host App is disconnected; from the Host App's first connection on,
 it buffers what arrives so the adapter can replay it after a reconnect. Messages signal-cli receives
-after it (re)starts and before the Host App connects are not replayed.
+after it (re)starts and before the Host App connects are not replayed. The example keeps the adapter's
+receive cursor in memory, so it also misses what arrives while the bot itself is down; use a persistent
+state adapter in production (see Reliable receive).
 
 The image comes from its publisher; this repository publishes no signal-cli image (see
 [ADR-0001](docs/adr/0001-signal-cli-as-separate-program.md)).
@@ -152,20 +154,8 @@ same volume (`docker compose run --rm signal-cli <arguments>`; the image's entry
 If the stack is already running, stop it first (`docker compose stop`) and start it again afterwards
 (`docker compose up -d`): the daemon loads accounts only when it starts.
 
-**Link to an existing account** (e.g. a personal number), as a linked device:
-
-```sh
-docker compose run --rm signal-cli link -n echo-bot
-```
-
-signal-cli prints a QR code (when run in a terminal) and a `sgnl://linkdevice?…` URI, and waits. In
-Signal on the phone, open Settings → Linked devices, link a new device and scan the code (or render the
-URI as a QR code yourself, e.g. with `qrencode`). The Bot Account is then that phone's number, and the
-bot answers everyone who writes to it. The adapter ignores what you send from your own devices (sync
-messages).
-
-**Register a dedicated number** (one that can receive an SMS or a call; not the number of a phone that
-uses Signal, as registering moves the account away from that phone):
+**Register a dedicated number** (recommended for a bot; one that can receive an SMS or a call, not the
+number of a phone that uses Signal, as registering moves the account away from that phone):
 
 ```sh
 docker compose run --rm signal-cli -a +15550000001 register
@@ -185,16 +175,32 @@ docker compose run --rm signal-cli -a +15550000001 verify 123-456
 Set a profile name so users see who answers, e.g.
 `docker compose run --rm signal-cli -a +15550000001 updateProfile --given-name "Echo bot"`.
 
+**Or link to an existing account** as a linked device:
+
+```sh
+docker compose run --rm signal-cli link -n echo-bot
+```
+
+signal-cli prints a QR code (when run in a terminal) and a `sgnl://linkdevice?…` URI, and waits. In
+Signal on the phone, open Settings → Linked devices, link a new device and scan the code (or render the
+URI as a QR code yourself, e.g. with `qrencode`). The Bot Account is then that phone's number: the bot
+reads everything sent to it and answers as you. Linking a personal number makes the echo bot reply to
+every contact who writes to you. The adapter ignores what you send from your own devices (sync
+messages), so test from another account.
+
 ## Security
 
 signal-cli's HTTP daemon, like its socket and TCP daemons, has no authentication: anyone who can reach
 it can read the Bot Account's messages and send as the bot.
 
 - Keep it on a private network. The example publishes no ports: only containers on the compose network
-  reach `http://signal-cli:8080`. Don't add `ports:` to the signal-cli service; for debugging from the
-  host, bind to loopback only (`127.0.0.1:8080:8080`).
+  reach `http://signal-cli:8080`. Don't add `ports:` to the signal-cli service, not even on loopback:
+  bound to `0.0.0.0` in the container, signal-cli checks no `Host` header, so any web page you open could
+  reach it through DNS rebinding. To look at it, use a one-off container on the compose network (e.g.
+  `docker compose run --rm --entrypoint bash signal-cli`).
 - The data volume holds the Bot Account's keys: whoever has a copy can act as the bot. Treat it and its
-  backups like a secret.
+  backups like a secret. `docker compose down -v` deletes it, and with it the Bot Account's
+  registration or link; plain `docker compose down` keeps it.
 
 ### Remote Host Apps: reverse proxy with auth
 
@@ -218,7 +224,7 @@ volumes:
 ```caddyfile
 signal.example.com {
 	basic_auth {
-		# hash: docker run --rm caddy:2 caddy hash-password --plaintext '<password>'
+		# hash: docker run --rm -it caddy:2 caddy hash-password   (prompts for the password)
 		echo-bot <hash>
 	}
 	reverse_proxy signal-cli:8080
@@ -227,6 +233,7 @@ signal.example.com {
 
 ```ts
 const password = process.env.SIGNAL_CLI_PASSWORD;
+if (!password) throw new Error("SIGNAL_CLI_PASSWORD is not set");
 
 createSignalAdapter({
   account: "+15550000001",
@@ -238,16 +245,19 @@ createSignalAdapter({
 });
 ```
 
-With missing or wrong credentials, `initialize()` rejects with `AuthenticationError` (HTTP 401). Any
-proxy and scheme works, e.g. a bearer token checked by the proxy, as long as the proxy:
+Use a long random password and an `https://` URL only: basic auth sends the password with every request.
+Whoever passes the proxy gets all of signal-cli's JSON-RPC, not only sending and receiving. With missing
+or wrong credentials, `initialize()` rejects with `AuthenticationError` (HTTP 401). Any proxy and scheme
+works, e.g. a bearer token checked by the proxy, as long as the proxy:
 
-- passes the event stream (`/api/v1/events`, server-sent events) through unbuffered and keeps it open:
-  Caddy does so by itself; nginx needs `proxy_buffering off;`.
+- passes the event stream (`/api/v1/events`, server-sent events) through and keeps it open; Caddy and
+  nginx do so with their defaults. Keep any proxy read timeout above signal-cli's keep-alive interval
+  (15 s by default).
 - sends a `Host` header signal-cli accepts: bound to a specific address (e.g.
-  `daemon --http 127.0.0.1:8080` on the proxy's host), signal-cli accepts only that address or
-  `localhost` and answers others with 421. Caddy forwards the client's `Host` unless told
-  `header_up Host {upstream_hostport}`; nginx sends the upstream's by default. Bound to `0.0.0.0`, as
-  in the example, signal-cli checks no `Host`.
+  `daemon --http 127.0.0.1:8080` on the proxy's host), signal-cli accepts only that address,
+  `localhost`, `127.0.0.1` or `::1` (with the bound port, if a port is given) and answers others with
+  421. Caddy forwards the client's `Host` unless told `header_up Host {upstream_hostport}`; nginx sends
+  the upstream's by default. Bound to `0.0.0.0`, as in the example, signal-cli checks no `Host`.
 
 ## Deployment
 
@@ -256,9 +266,10 @@ receives only while it holds the event stream open. Serverless and edge function
 
 Keep signal-cli current: Signal changes its server over time, and signal-cli releases older than about
 three months may stop working. Update the image tag regularly; this repository's
-[`renovate.json`](renovate.json) makes Renovate open a pull request for each new `signal-cli-native` tag
-(the tag scheme `v<major>-<minor>-<patch>-<build>` needs its `regex` versioning; copy that rule into
-your own Renovate config). After updating: `docker compose pull signal-cli && docker compose up -d`.
+[`renovate.json`](renovate.json) makes Renovate, where it runs on the repository, open a pull request for
+each new `signal-cli-native` tag (the tag scheme `v<major>-<minor>-<patch>-<build>[-<revision>]` needs its
+`regex` versioning; copy that rule into your own Renovate config). After updating:
+`docker compose pull signal-cli && docker compose up -d`.
 
 ## Reliable receive
 

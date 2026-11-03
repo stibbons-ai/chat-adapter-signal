@@ -25,3 +25,12 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm pack --dry-run
+
+  example:
+    name: Docker example
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker compose -f examples/echo-bot/compose.yaml config --quiet
+      # Builds the echo-bot image locally; nothing is pushed (ADR-0001).
+      - run: docker compose -f examples/echo-bot/compose.yaml build echo-bot

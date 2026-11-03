@@ -22,6 +22,12 @@ await chat.initialize();
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
-    void chat.shutdown().finally(() => process.exit(0));
+    chat.shutdown().then(
+      () => process.exit(0),
+      (error: unknown) => {
+        console.error(error);
+        process.exit(1);
+      },
+    );
   });
 }

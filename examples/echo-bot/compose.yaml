@@ -31,6 +31,8 @@ services:
       signal-cli:
         condition: service_healthy
     restart: unless-stopped
+    # Forwards docker stop's SIGTERM to the bot also while it is still starting.
+    init: true
 
 volumes:
   signal-cli-data:
