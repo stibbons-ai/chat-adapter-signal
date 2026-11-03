@@ -140,6 +140,21 @@ export async function withDeadline<T>(what: string, timeoutMs: number, exchange:
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
 /**
+ * Slowest transfer an attachment request's deadline allows for, in bytes per millisecond: 64 kB/s
+ * (about 512 kbit/s) of base64. During `send` signal-cli also uploads the file to Signal before it
+ * answers; both legs over one link fit the allowance down to about 0.9 Mbit/s.
+ */
+const MIN_TRANSFER_BYTES_PER_MS = 64;
+
+/**
+ * The deadline of a request that carries or returns `transferBytes` of attachment content (base64):
+ * `requestTimeoutMs` plus the time those bytes take at the slowest transfer rate allowed for.
+ */
+export function requestDeadlineMs(requestTimeoutMs: number, transferBytes = 0): number {
+  return Math.min(requestTimeoutMs + Math.ceil(transferBytes / MIN_TRANSFER_BYTES_PER_MS), MAX_TIMEOUT_MS);
+}
+
+/**
  * Rejects a delay option `setTimeout` would not honour: outside this range it
  * fires after 1 ms, which would turn "wait long" into "don't wait".
  */

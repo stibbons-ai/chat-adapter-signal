@@ -23,6 +23,8 @@ export interface SignalAttachment {
 type AttachmentLocator = { id: string; threadId: string };
 
 const DEFAULT_MIME_TYPE = "application/octet-stream";
+/** signal-cli 0.14.9 refuses to send or download a larger attachment (ServiceConfig.MAX_ATTACHMENT_SIZE). */
+const MAX_ATTACHMENT_BYTES = 150 * 1024 * 1024;
 
 /** Whether an outgoing message carries files or attachments. */
 export function hasAttachments(message: AdapterPostableMessage): boolean {
@@ -136,20 +138,28 @@ export function withFetchData(attachment: Attachment, transport: SignalTransport
   if (typeof id !== "string" || !id || typeof threadId !== "string") {
     return attachment;
   }
-  return { ...attachment, fetchData: () => fetchAttachment(transport, account, { id, threadId }) };
+  return { ...attachment, fetchData: () => fetchAttachment(transport, account, { id, threadId }, attachment.size) };
 }
 
 /**
  * signal-cli 0.14.9 looks the file up by `id` alone, but its CLI requires the sender of a 1:1
  * message (`recipient`) or the Group (`groupId`) too, so the adapter sends the matching one.
+ * The deadline grows with the reply's base64 size. The sender's client reports `size`: an unknown
+ * one (absent, 0 or not a count) or one beyond what signal-cli downloads counts as the largest it downloads.
  */
-async function fetchAttachment(transport: SignalTransport, account: string, { id, threadId }: AttachmentLocator): Promise<Buffer> {
+async function fetchAttachment(
+  transport: SignalTransport,
+  account: string,
+  { id, threadId }: AttachmentLocator,
+  size: number | undefined,
+): Promise<Buffer> {
   const conversation = decodeThreadId(threadId);
-  const result = await transport.request<{ data?: unknown } | null>("getAttachment", {
-    account,
-    id,
-    ...(conversation.type === "dm" ? { recipient: conversation.aci } : { groupId: conversation.groupId }),
-  });
+  const bytes = isCount(size) && size > 0 ? Math.min(size, MAX_ATTACHMENT_BYTES) : MAX_ATTACHMENT_BYTES;
+  const result = await transport.request<{ data?: unknown } | null>(
+    "getAttachment",
+    { account, id, ...(conversation.type === "dm" ? { recipient: conversation.aci } : { groupId: conversation.groupId }) },
+    { transferBytes: Math.ceil(bytes / 3) * 4 },
+  );
   if (typeof result?.data !== "string") {
     throw malformedResponse("getAttachment");
   }

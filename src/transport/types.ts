@@ -27,6 +27,14 @@ export interface EventSubscription {
   close(): Promise<void>;
 }
 
+export interface RequestOptions {
+  /**
+   * Attachment content (base64 bytes) the request carries or its reply returns: it extends the
+   * request's deadline beyond `requestTimeoutMs` (see `requestDeadlineMs`). Default 0.
+   */
+  transferBytes?: number;
+}
+
 /**
  * Talks to one signal-cli instance on behalf of one Bot Account: over HTTP
  * (`http.ts`) or line-delimited JSON-RPC over stdio, a Unix socket or TCP (`line.ts`).
@@ -37,8 +45,8 @@ export interface SignalTransport {
   readonly endpoint: string;
   /** Resolves when signal-cli is reachable; rejects with a shared adapter error otherwise. */
   checkReachable(): Promise<void>;
-  /** Sends one JSON-RPC request and resolves with its `result`. */
-  request<T>(method: string, params?: Record<string, unknown>): Promise<T>;
+  /** Sends one JSON-RPC request and resolves with its `result`; rejects with a `NetworkError` once its deadline passes. */
+  request<T>(method: string, params?: Record<string, unknown>, options?: RequestOptions): Promise<T>;
   /** Opens a fresh event stream and resolves once it is connected; rejects when unreachable or aborted. */
   subscribe(listener: EventListener, options?: SubscribeOptions): Promise<EventSubscription>;
   /**

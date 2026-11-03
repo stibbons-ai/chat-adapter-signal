@@ -1,3 +1,6 @@
+import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { Readable } from "node:stream";
 import {
   AdapterRateLimitError,
   AuthenticationError,
@@ -11,12 +14,13 @@ import {
   assertTimeoutMs,
   fromJsonRpcError,
   malformedResponse,
+  requestDeadlineMs,
   unreachable,
   withDeadline,
   type JsonRpcErrorObject,
 } from "../errors.js";
 import { parseEventStream } from "./sse.js";
-import type { EventListener, EventSubscription, SignalTransport, SubscribeOptions } from "./types.js";
+import type { EventListener, EventSubscription, RequestOptions, SignalTransport, SubscribeOptions } from "./types.js";
 
 export interface HttpTransportOptions {
   type: "http";
@@ -77,19 +81,17 @@ export class HttpTransport implements SignalTransport {
     }
   }
 
-  request<T>(method: string, params?: Record<string, unknown>): Promise<T> {
-    return withDeadline(`signal-cli JSON-RPC ${method} at ${this.endpoint}`, this.requestTimeoutMs, async (signal) => {
-      const response = await this.fetchPath(
+  request<T>(method: string, params?: Record<string, unknown>, { transferBytes }: RequestOptions = {}): Promise<T> {
+    const deadlineMs = requestDeadlineMs(this.requestTimeoutMs, transferBytes);
+    return withDeadline(`signal-cli JSON-RPC ${method} at ${this.endpoint}`, deadlineMs, async (signal) => {
+      const response = await this.post(
         "/api/v1/rpc",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", id: this.nextRequestId++, method, params }),
-          signal,
-        },
+        JSON.stringify({ jsonrpc: "2.0", id: this.nextRequestId++, method, params }),
+        signal,
         `JSON-RPC ${method}`,
       );
       if (!response.ok) {
+        await response.body?.cancel().catch(() => {}); // release the connection
         throw fromHttpStatus(response, `signal-cli JSON-RPC ${method}`);
       }
       let payload: JsonRpcResponse<T> | null;
@@ -218,4 +220,55 @@ export class HttpTransport implements SignalTransport {
       throw unreachable(`${what} at ${this.endpoint}`, error);
     }
   }
+
+  /**
+   * POSTs JSON with node:http(s), not fetch: undici (behind Node's fetch) fails a request whose
+   * response headers take over 300 s (`headersTimeout`), and signal-cli answers a `send` only after
+   * it uploaded the attachments to Signal. Only `signal` (the request's deadline) bounds this one.
+   * Unlike fetch it follows no redirects and ignores a global undici dispatcher; signal-cli needs neither.
+   */
+  private post(path: string, body: string, signal: AbortSignal, what: string): Promise<Response> {
+    return new Promise((resolve, reject) => {
+      const fail = (error: unknown) => reject(unreachable(`${what} at ${this.endpoint}`, error));
+      try {
+        const url = new URL(this.endpoint + path);
+        const send = url.protocol === "https:" ? httpsRequest : httpRequest;
+        const headers = { ...this.headers, "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(body)) };
+        const request = send(url, { method: "POST", headers, signal }, (incoming) => {
+          const status = incoming.statusCode!;
+          // Statuses that carry no body: a Response with one would throw.
+          const nullBody = status === 204 || status === 205 || status === 304;
+          try {
+            const content = nullBody ? null : (Readable.toWeb(incoming) as ReadableStream<Uint8Array>);
+            resolve(new Response(content, { status, headers: responseHeaders(incoming.headers) }));
+          } catch (error) {
+            // A status outside 200-599 (a misbehaving proxy): Response refuses it, fetch reported it as non-2xx.
+            incoming.destroy();
+            reject(new NetworkError(ADAPTER_NAME, `signal-cli ${what} returned HTTP ${status}`, error as Error));
+            return;
+          }
+          if (nullBody) {
+            incoming.resume();
+          }
+        });
+        request.on("error", fail);
+        // A connection that closes with neither a response nor an error (e.g. a 101 reply, which node:http
+        // hands only to 'upgrade' listeners) would otherwise leave the request pending past its deadline.
+        request.on("close", () => fail(new Error("connection closed without a response")));
+        request.end(body);
+      } catch (error) {
+        fail(error); // an invalid URL or header, as fetch would reject
+      }
+    });
+  }
+}
+
+function responseHeaders(incoming: IncomingHttpHeaders): Headers {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(incoming)) {
+    for (const item of Array.isArray(value) ? value : value === undefined ? [] : [value]) {
+      headers.append(name, item);
+    }
+  }
+  return headers;
 }
