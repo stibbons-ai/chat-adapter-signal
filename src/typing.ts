@@ -13,7 +13,7 @@ interface Typing {
   /** The latest indicator on its way to signal-cli; never rejects. */
   refreshing: Promise<void>;
   timer?: NodeJS.Timeout;
-  /** Past `until`: no more refreshes, the last indicator is still visible. */
+  /** No refresh fits before `until`: none scheduled, the last indicator is still visible. */
   fading?: boolean;
 }
 
@@ -58,7 +58,7 @@ export class TypingIndicators {
   }
 
   /**
-   * Stops refreshing; true if the indicator was active. Waits for a refresh already on its way,
+   * Stops refreshing; true if an indicator was sent or is on its way. Waits for a refresh already on its way,
    * so it cannot reach the recipient after a message that follows: Signal clients clear the
    * indicator on the next message from the typist.
    */

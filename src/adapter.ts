@@ -201,7 +201,6 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
    */
   async disconnect(): Promise<void> {
     this.generation++;
-    this.typing.stopAll();
     const loop = this.loop;
     this.loop = undefined;
     if (loop) {
@@ -211,8 +210,10 @@ export class SignalAdapter implements Adapter<SignalThreadId, SignalRawMessage> 
         this.logger?.warn(`Stopped waiting for ${pending} Signal message handler(s) after ${this.drainTimeoutMs} ms`);
       }
     }
-    // After the drain: running handlers reply through the transport. ponytail: a handler that
-    // outlives drainTimeoutMs and sends afterwards reopens the transport; nothing closes that one.
+    // After the drain: running handlers reply through the transport, and their streams keep
+    // typing until then. ponytail: a handler that outlives drainTimeoutMs and sends afterwards
+    // reopens the transport; nothing closes that one.
+    this.typing.stopAll();
     await this.transport.close();
   }
 
