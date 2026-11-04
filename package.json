@@ -1,6 +1,6 @@
 {
   "name": "@stibbons/chat-adapter-signal",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Signal adapter for the Chat SDK, built on a separately installed signal-cli",
   "license": "MIT",
   "type": "module",
