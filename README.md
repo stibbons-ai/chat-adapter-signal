@@ -309,10 +309,11 @@ Limits:
 - Run your own HTTP daemon with `--receive-mode on-connection` and a persistent state adapter. With
   signal-cli's default, `on-start`, messages received between a signal-cli (re)start and the Host App's
   first connection are not buffered and are lost. With `on-connection`, signal-cli receives only while
-  an event stream is connected, but notices a lost Host App only when a keep-alive write fails: if its
-  container or host goes away without closing the connection, signal-cli can keep receiving for up to
-  about 15 minutes (the operating system's TCP retransmission timeout). Those messages are replayed
-  only from a persisted cursor.
+  an event stream is connected, but notices a lost Host App only when a keep-alive write fails. Once
+  the Host App's container or host is gone, even after a clean shutdown, signal-cli can keep receiving
+  for up to about 15 minutes (the operating system's TCP retransmission timeout); a Host App process
+  that stops on a still-running host is noticed at the next keep-alive, by default within about 15-30 s.
+  Those messages are replayed only from a persisted cursor.
 - With `concurrency: "queue"` or `"debounce"`, `processMessage` completes once the message is
   queued in Chat's state, not when its handler finishes.
 - A message whose handler was cut off by a crash is replayed, but Chat skips it as a duplicate
