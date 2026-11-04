@@ -14,9 +14,6 @@ yourself; this package never bundles, downloads or installs signal-cli or libsig
 npm install @stibbons/chat-adapter-signal chat @chat-adapter/state-memory
 ```
 
-Not yet on npm: until the first release, the [Docker example](#docker-example-echo-bot) builds the
-package from this repository.
-
 - Node.js 24 or newer, ESM only.
 - `chat` ^4.43 (peer dependency), plus a Chat state adapter (`@chat-adapter/state-memory` to try it out;
   a persistent one such as Redis in production, see Reliable receive).
