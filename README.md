@@ -137,14 +137,16 @@ Then send the Bot Account a message from another Signal account. As long as no B
 provisioned (with `SIGNAL_ACCOUNT` set), the bot exits with `AuthenticationError: Bot Account … is not
 registered or linked on the signal-cli daemon` and compose restarts it.
 
-`--receive-mode on-connection` makes signal-cli receive from Signal only while the Host App's event
-stream is connected. Messages sent while it is not (signal-cli just started, the bot down or
-reconnecting) stay queued at Signal and arrive once the bot connects. signal-cli's default,
-`on-start`, receives from the moment it starts, but buffers for replay only from the first connection
-on, so messages between a signal-cli (re)start and the bot's first connection would be lost. The
-example keeps the adapter's receive cursor in memory, so after a bot restart it does not replay events
-signal-cli received but the bot had not processed yet; use a persistent state adapter in production
-(see Reliable receive).
+`--receive-mode on-connection` makes signal-cli start receiving from Signal only once the Host App's
+event stream connects, so messages sent between a signal-cli (re)start and the bot's first connection
+stay queued at Signal. signal-cli's default, `on-start`, receives from the moment it starts, but buffers
+for replay only from the first connection on, so those messages would be lost. signal-cli stops
+receiving only once it notices the bot is gone, when a keep-alive write fails: after the bot's container
+stops, that can take up to about 15 minutes (the operating system's TCP retransmission timeout).
+Messages received in that window are taken off Signal and kept in signal-cli's replay buffer; the bot
+gets them only by resuming from a persisted receive cursor. The example keeps the cursor in memory, so
+those messages are lost, as are events the bot received but had not processed before a restart; use a
+persistent state adapter in production (see Reliable receive).
 
 The image comes from its publisher; this repository publishes no signal-cli image (see
 [ADR-0001](docs/adr/0001-signal-cli-as-separate-program.md)).
@@ -304,6 +306,14 @@ Limits:
   or received before a signal-cli restart that the adapter missed, are not replayed.
 - To resume after a Host App restart, the state adapter must be persistent (e.g. Redis);
   `@chat-adapter/state-memory` loses the cursor with the process.
+- Run your own HTTP daemon with `--receive-mode on-connection` and a persistent state adapter. With
+  signal-cli's default, `on-start`, messages received between a signal-cli (re)start and the Host App's
+  first connection are not buffered and are lost. With `on-connection`, signal-cli receives only while
+  an event stream is connected, but notices a lost Host App only when a keep-alive write fails. Once
+  the Host App's container or host is gone, even after a clean shutdown, signal-cli can keep receiving
+  for up to about 15 minutes (the operating system's TCP retransmission timeout); a Host App process
+  that stops on a still-running host is noticed at the next keep-alive, by default within about 15-30 s.
+  Those messages are replayed only from a persisted cursor.
 - With `concurrency: "queue"` or `"debounce"`, `processMessage` completes once the message is
   queued in Chat's state, not when its handler finishes.
 - A message whose handler was cut off by a crash is replayed, but Chat skips it as a duplicate
