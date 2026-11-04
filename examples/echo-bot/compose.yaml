@@ -6,7 +6,7 @@ services:
     # Community image (ADR-0001); Renovate keeps the tag current.
     image: registry.gitlab.com/packaging/signal-cli/signal-cli-native:v0-14-9-2
     # --no-receive-stdout keeps message contents out of the container log.
-    command: daemon --http 0.0.0.0:8080 --receive-mode on-start --no-receive-stdout
+    command: daemon --http 0.0.0.0:8080 --receive-mode on-connection --no-receive-stdout
     # No `ports`: the HTTP daemon has no authentication. It is reachable at http://signal-cli:8080 from
     # this compose network (and, on Linux, from the Docker host via the container's IP).
     volumes:

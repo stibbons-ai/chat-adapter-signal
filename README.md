@@ -119,7 +119,7 @@ compose file:
 - `signal-cli`: the community image `registry.gitlab.com/packaging/signal-cli/signal-cli-native`
   ([packaging/signal-cli](https://gitlab.com/packaging/signal-cli), a native build that needs no Java),
   pinned to a release tag in `compose.yaml`. It runs
-  `daemon --http 0.0.0.0:8080 --receive-mode on-start --no-receive-stdout` and keeps its data (the Bot
+  `daemon --http 0.0.0.0:8080 --receive-mode on-connection --no-receive-stdout` and keeps its data (the Bot
   Account's keys and state) in the `signal-cli-data` volume. It publishes no ports.
 - `echo-bot`: [`bot.ts`](examples/echo-bot/bot.ts), which answers 1:1 messages and Mentions with
   `echo: <text>`. It reaches signal-cli at `http://signal-cli:8080` (`SIGNAL_CLI_URL`) and speaks as
@@ -137,12 +137,14 @@ Then send the Bot Account a message from another Signal account. As long as no B
 provisioned (with `SIGNAL_ACCOUNT` set), the bot exits with `AuthenticationError: Bot Account … is not
 registered or linked on the signal-cli daemon` and compose restarts it.
 
-`--receive-mode on-start` (signal-cli's default, spelled out) makes signal-cli receive from Signal from
-the moment it starts, also while the Host App is disconnected; from the Host App's first connection on,
-it buffers what arrives so the adapter can replay it after a reconnect. Messages signal-cli receives
-after it (re)starts and before the Host App connects are not replayed. The example keeps the adapter's
-receive cursor in memory, so it also misses what arrives while the bot itself is down; use a persistent
-state adapter in production (see Reliable receive).
+`--receive-mode on-connection` makes signal-cli receive from Signal only while the Host App's event
+stream is connected. Messages sent while it is not (signal-cli just started, the bot down or
+reconnecting) stay queued at Signal and arrive once the bot connects. signal-cli's default,
+`on-start`, receives from the moment it starts, but buffers for replay only from the first connection
+on, so messages between a signal-cli (re)start and the bot's first connection would be lost. The
+example keeps the adapter's receive cursor in memory, so after a bot restart it does not replay events
+signal-cli received but the bot had not processed yet; use a persistent state adapter in production
+(see Reliable receive).
 
 The image comes from its publisher; this repository publishes no signal-cli image (see
 [ADR-0001](docs/adr/0001-signal-cli-as-separate-program.md)).
