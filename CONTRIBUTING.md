@@ -56,7 +56,7 @@ maintainer of the `@stibbons` scope:
    - Environment name: leave empty
    - Allowed actions: enable **`npm publish`** (only `npm stage publish` is allowed by default)
 
-   Or, with npm 11.15.0+:
+   Or, with npm 11.15.0+, logged in to an account with 2FA enabled:
 
    ```sh
    npm trust github @stibbons/chat-adapter-signal --repo stibbons-ai/chat-adapter-signal --file publish.yml --allow-publish
