@@ -4,19 +4,19 @@ on:
   push:
     tags: ["v*"]
 
-# npm trusted publishing (OIDC): no NPM_TOKEN; id-token mints the short-lived publish credential
-# and the provenance attestation. See CONTRIBUTING.md for the one-time npmjs.com setup.
+# npm trusted publishing (OIDC): no NPM_TOKEN. One-time npmjs.com setup: CONTRIBUTING.md.
 permissions:
   contents: read
   id-token: write
 
 jobs:
   publish:
-    # Trusted publishing needs a GitHub-hosted runner, npm >= 11.5.1 and Node >= 22.14.0;
-    # current Node 24 releases bundle npm >= 11.5.1 (24.14: npm 11.9).
+    # Trusted publishing needs a GitHub-hosted runner and npm >= 11.5.1 (bundled with Node 24.5+).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Tag matches package.json version
         env:
           TAG: ${{ github.ref_name }}
@@ -31,6 +31,7 @@ jobs:
           node-version: "24"
           registry-url: https://registry.npmjs.org
           package-manager-cache: false # no cache in release builds
-      - run: npm ci
+      # No dependency install scripts while this job can mint a publish token; prepack still builds.
+      - run: npm ci --ignore-scripts
       - run: npm run check
       - run: npm publish --provenance --access public
